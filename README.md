@@ -1,5 +1,7 @@
 # Orbit Download Manager
 
+**Website and downloads: [orbitdm.netlify.app](https://orbitdm.netlify.app/)** · [Releases](https://github.com/neoberent/Orbit-release/releases) · [Browser extension](https://github.com/neoberent/Orbit-Extension)
+
 Orbit is a modern, cross-platform download manager inspired by Free Download Manager,
 combining multi-connection (segmented) HTTP/HTTPS downloads with full BitTorrent support
 (magnet links and `.torrent` files) behind a polished Qt Quick UI.
