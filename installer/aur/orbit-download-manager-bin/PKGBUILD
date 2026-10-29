@@ -37,7 +37,7 @@ conflicts=('orbit-download-manager' 'orbit' 'orbit-bin')
 install=orbit-download-manager.install
 options=('!strip' '!debug')
 source=("https://github.com/neoberent/Orbit-release/releases/download/$_tag/OrbitSetup-$pkgver-linux.tar.gz")
-sha256sums=('f26d646346cf17b44e7517354a519e4c89afcda1f92e0c7ce9bb34a49e34d4ac')
+sha256sums=('e7d436b1d0da48e087e50f3e997df8500fe219b0b1166abefeac9db77c1f6331')
 
 package() {
     cd "orbit-$pkgver-linux-$CARCH"
