@@ -1,0 +1,35 @@
+_notes() {
+    cat <<'EOF'
+
+  Orbit Download Manager is installed. Start it from the application menu or run: orbit
+
+  By using Orbit you accept its license and privacy policy:
+    /usr/share/licenses/orbit-download-manager-bin/License.txt
+    /usr/share/licenses/orbit-download-manager-bin/PrivacyPolicy.txt
+
+  Orbit registers orbit:// links, .torrent files and the browser connection
+  for your account the first time it starts.
+
+  Optional:
+    yt-dlp + ffmpeg                    video downloads (YouTube, TikTok, Twitch, ...)
+    orbit-download-manager-extension   the browser extension
+
+  Updates come through your AUR helper (yay -Syu / paru -Syu), not from inside Orbit.
+
+EOF
+}
+
+post_install() {
+    _notes
+    echo "  If you used Orbit's own installer before, remove that copy (your settings stay):"
+    echo "    ~/.local/lib/orbit/uninstall.sh"
+    echo
+}
+
+post_upgrade() {
+    echo "  Restart Orbit to use version ${1%-*}."
+}
+
+post_remove() {
+    echo "  Your settings and download list stay in ~/.config/Orbit and ~/.local/share/orbit."
+}

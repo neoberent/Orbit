@@ -1,0 +1,56 @@
+<RCC>
+    <qresource prefix="/qml">
+        <file alias="qmldir">qml/qmldir</file>
+        <file alias="main.qml">qml/main.qml</file>
+        <file alias="Theme.qml">qml/Theme.qml</file>
+        <file alias="Icon.qml">qml/Icon.qml</file>
+        <file alias="IconButton.qml">qml/IconButton.qml</file>
+        <file alias="ModernButton.qml">qml/ModernButton.qml</file>
+        <file alias="ProgressIndicator.qml">qml/ProgressIndicator.qml</file>
+        <file alias="ToggleSwitch.qml">qml/ToggleSwitch.qml</file>
+        <file alias="SliderControl.qml">qml/SliderControl.qml</file>
+        <file alias="EmptyState.qml">qml/EmptyState.qml</file>
+        <file alias="SidebarItem.qml">qml/SidebarItem.qml</file>
+        <file alias="Sidebar.qml">qml/Sidebar.qml</file>
+        <file alias="TopBar.qml">qml/TopBar.qml</file>
+        <file alias="AddDownloadDialog.qml">qml/AddDownloadDialog.qml</file>
+        <file alias="SettingsPage.qml">qml/SettingsPage.qml</file>
+        <file alias="CopyableCommand.qml">qml/CopyableCommand.qml</file>
+        <file alias="StatusBadge.qml">qml/StatusBadge.qml</file>
+        <file alias="OrbitMenu.qml">qml/OrbitMenu.qml</file>
+        <file alias="OrbitMenuItem.qml">qml/OrbitMenuItem.qml</file>
+        <file alias="OrbitToolTip.qml">qml/OrbitToolTip.qml</file>
+        <file alias="DialogSurface.qml">qml/DialogSurface.qml</file>
+        <file alias="DownloadRow.qml">qml/DownloadRow.qml</file>
+        <file alias="DownloadTable.qml">qml/DownloadTable.qml</file>
+        <file alias="DetailsPane.qml">qml/DetailsPane.qml</file>
+        <file alias="StatusBar.qml">qml/StatusBar.qml</file>
+        <file alias="FileTile.qml">qml/FileTile.qml</file>
+        <file alias="SegmentedControl.qml">qml/SegmentedControl.qml</file>
+        <file alias="FormField.qml">qml/FormField.qml</file>
+        <file alias="SettingsGroup.qml">qml/SettingsGroup.qml</file>
+        <file alias="SettingsRow.qml">qml/SettingsRow.qml</file>
+        <file alias="KeyCap.qml">qml/KeyCap.qml</file>
+        <file alias="Prefs.qml">qml/Prefs.qml</file>
+        <file alias="SpeedGraph.qml">qml/SpeedGraph.qml</file>
+        <file alias="SpeedHistory.qml">qml/SpeedHistory.qml</file>
+        <file alias="ConfirmDialog.qml">qml/ConfirmDialog.qml</file>
+        <file alias="UpdateDialog.qml">qml/UpdateDialog.qml</file>
+        <file alias="Toast.qml">qml/Toast.qml</file>
+        <file alias="RenameDialog.qml">qml/RenameDialog.qml</file>
+        <file alias="FileConflictDialog.qml">qml/FileConflictDialog.qml</file>
+        <file alias="RefreshLinkDialog.qml">qml/RefreshLinkDialog.qml</file>
+        <file alias="DownloadOptionsDialog.qml">qml/DownloadOptionsDialog.qml</file>
+        <file alias="ChecksumDialog.qml">qml/ChecksumDialog.qml</file>
+        <file alias="WhenDoneDialog.qml">qml/WhenDoneDialog.qml</file>
+        <file alias="ClipboardPrompt.qml">qml/ClipboardPrompt.qml</file>
+        <file alias="TabStrip.qml">qml/TabStrip.qml</file>
+        <file alias="PieceMap.qml">qml/PieceMap.qml</file>
+        <file alias="TorrentDetailsView.qml">qml/TorrentDetailsView.qml</file>
+        <file alias="DayPicker.qml">qml/DayPicker.qml</file>
+    </qresource>
+    <qresource prefix="/images">
+        <file alias="logo.png">assets/logo.png</file>
+        <file alias="favicon.png">assets/favicon.png</file>
+    </qresource>
+</RCC>

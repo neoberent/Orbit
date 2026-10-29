@@ -1,0 +1,68 @@
+# Maintainer: Neo Berent <neo.berent1@gmail.com>
+#
+# Orbit Download Manager from its Linux release archive (the same one the website offers).
+# installer/aur/update-aur.sh bumps pkgver, _tag and the checksum for each release.
+
+pkgname=orbit-download-manager-bin
+pkgver=3.1.2
+pkgrel=1
+_tag=Release3.1.2
+pkgdesc='Multi-connection HTTP, BitTorrent and video download manager (Qt 6)'
+arch=('x86_64')
+url='https://github.com/neoberent/Orbit'
+license=('GPL-3.0-or-later')
+depends=(
+    'curl'
+    'gcc-libs'
+    'glibc'
+    'hicolor-icon-theme'
+    'libglvnd'
+    'libtorrent-rasterbar'
+    'libxcb'
+    'openssl'
+    'qt6-base'
+    'qt6-declarative'
+    'qt6-svg'
+)
+optdepends=(
+    'yt-dlp: YouTube, TikTok, Twitch and other video downloads'
+    'ffmpeg: merging video and audio streams, audio extraction'
+    'qt6-wayland: native Wayland window instead of XWayland'
+    'xdg-utils: registering orbit:// links as the default handler'
+    'orbit-download-manager-extension: browser extension (Chrome, Edge, Brave, Firefox)'
+)
+provides=('orbit-download-manager')
+# /usr/bin/orbit is also used by these unrelated AUR packages.
+conflicts=('orbit-download-manager' 'orbit' 'orbit-bin')
+install=orbit-download-manager.install
+options=('!strip' '!debug')
+source=("https://github.com/neoberent/Orbit-release/releases/download/$_tag/OrbitSetup-$pkgver-linux.tar.gz")
+sha256sums=('f26d646346cf17b44e7517354a519e4c89afcda1f92e0c7ce9bb34a49e34d4ac')
+
+package() {
+    cd "orbit-$pkgver-linux-$CARCH"
+
+    # orbit-native-host has to sit next to orbit: Orbit points the browsers' native
+    # messaging manifests at the folder it runs from.
+    install -Dm755 orbit orbit-native-host -t "$pkgdir/usr/lib/orbit-download-manager/"
+    install -dm755 "$pkgdir/usr/bin"
+    ln -s /usr/lib/orbit-download-manager/orbit "$pkgdir/usr/bin/orbit"
+
+    install -Dm644 orbit.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/orbit.png"
+    install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/orbit.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Orbit
+GenericName=Download Manager
+Comment=Multi-connection HTTP and BitTorrent downloads
+Exec=/usr/bin/orbit %u
+Icon=orbit
+Terminal=false
+Categories=Network;FileTransfer;
+MimeType=x-scheme-handler/orbit;application/x-bittorrent;
+StartupNotify=true
+StartupWMClass=orbit
+DESKTOP
+
+    install -Dm644 License.txt PrivacyPolicy.txt Inter-LICENSE.txt -t "$pkgdir/usr/share/licenses/$pkgname/"
+}

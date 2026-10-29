@@ -1,0 +1,69 @@
+#!/bin/sh
+# Walks you through adding the Orbit extension (installed by orbit-download-manager-extension)
+# to your browsers. Browsers don't let packages add extensions themselves, so this shows the
+# folder to pick and opens the browser's extensions page.
+#
+#   orbit-extension            pick a browser from the ones installed
+#   orbit-extension <browser>  e.g. chromium, google-chrome-stable, brave, firefox
+set -eu
+
+ext=/usr/share/orbit-download-manager/extension
+browsers='google-chrome-stable google-chrome chromium brave brave-browser microsoft-edge-stable vivaldi-stable vivaldi opera thorium-browser firefox librewolf floorp zen-browser waterfox'
+
+is_firefox() {
+    case $1 in firefox*|librewolf*|floorp*|zen*|waterfox*) return 0 ;; *) return 1 ;; esac
+}
+
+steps() {
+    if is_firefox "$1"; then
+        cat <<EOF
+
+  $1:
+    1. On the page that opens (about:debugging), click "Load Temporary Add-on...".
+    2. Pick this file:  $ext/firefox/manifest.json
+    Firefox only keeps unsigned add-ons until it restarts; Firefox Developer Edition,
+    Nightly or ESR with xpinstall.signatures.required = false in about:config keep it.
+
+EOF
+    else
+        cat <<EOF
+
+  $1:
+    1. On the page that opens, turn on "Developer mode" (top right).
+    2. Click "Load unpacked" and pick this folder:  $ext/chromium
+    The extension keeps its ID, so Orbit's browser connection works right away.
+
+EOF
+    fi
+}
+
+open_page() {
+    if is_firefox "$1"; then page='about:debugging#/runtime/this-firefox'; else page='chrome://extensions'; fi
+    nohup "$1" "$page" >/dev/null 2>&1 &
+}
+
+found=
+for b in $browsers; do command -v "$b" >/dev/null 2>&1 && found="$found $b"; done
+
+choice=${1:-}
+if [ -z "$choice" ]; then
+    if [ -z "$found" ]; then
+        echo "No supported browser was found. Load the extension by hand:"
+        steps chromium
+        steps firefox
+        exit 0
+    fi
+    echo "Add the Orbit extension to which browser?"
+    i=0
+    for b in $found; do i=$((i + 1)); echo "  $i) $b"; done
+    printf "Number [1]: "
+    read -r n || n=
+    n=${n:-1}
+    i=0
+    for b in $found; do i=$((i + 1)); [ "$i" = "$n" ] && choice=$b; done
+    [ -n "$choice" ] || { echo "Cancelled."; exit 1; }
+fi
+command -v "$choice" >/dev/null 2>&1 || { echo "error: $choice isn't installed" >&2; exit 1; }
+
+steps "$choice"
+open_page "$choice"

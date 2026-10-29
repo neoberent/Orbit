@@ -1,0 +1,30 @@
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @ORBIT_RC_VERSION@
+ PRODUCTVERSION @ORBIT_RC_VERSION@
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Orbit"
+            VALUE "FileDescription", "@ORBIT_RC_DESCRIPTION@"
+            VALUE "FileVersion", "@ORBIT_RELEASE_VERSION@"
+            VALUE "InternalName", "@ORBIT_RC_NAME@"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Orbit"
+            VALUE "OriginalFilename", "@ORBIT_RC_NAME@.exe"
+            VALUE "ProductName", "Orbit Download Manager"
+            VALUE "ProductVersion", "@ORBIT_RELEASE_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

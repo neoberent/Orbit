@@ -1,0 +1,16 @@
+pkgbase = orbit-download-manager-extension
+	pkgdesc = Browser extension that sends downloads, videos and magnet links to Orbit Download Manager
+	pkgver = 1.3.0
+	pkgrel = 1
+	url = https://github.com/neoberent/Orbit
+	install = orbit-download-manager-extension.install
+	arch = any
+	license = MIT
+	depends = orbit-download-manager
+	noextract = orbit-extension-1.3.0.zip
+	source = https://github.com/neoberent/Orbit-release/releases/download/Release3.1.2/orbit-extension-1.3.0.zip
+	source = orbit-extension
+	sha256sums = d7a79ed9895042a225b3909121ba5ec4fa7382aaef03e0dc59c6b6cb6263ae3d
+	sha256sums = 69941aaf9a78992d1c50838854897c04356fb18817256c2a1fc212c2ff2085e0
+
+pkgname = orbit-download-manager-extension

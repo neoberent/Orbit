@@ -1,0 +1,47 @@
+module Orbit
+singleton Theme 1.0 Theme.qml
+singleton Prefs 1.0 Prefs.qml
+Icon 1.0 Icon.qml
+IconButton 1.0 IconButton.qml
+ModernButton 1.0 ModernButton.qml
+ProgressIndicator 1.0 ProgressIndicator.qml
+ToggleSwitch 1.0 ToggleSwitch.qml
+SliderControl 1.0 SliderControl.qml
+EmptyState 1.0 EmptyState.qml
+SidebarItem 1.0 SidebarItem.qml
+Sidebar 1.0 Sidebar.qml
+TopBar 1.0 TopBar.qml
+AddDownloadDialog 1.0 AddDownloadDialog.qml
+SettingsPage 1.0 SettingsPage.qml
+CopyableCommand 1.0 CopyableCommand.qml
+StatusBadge 1.0 StatusBadge.qml
+OrbitMenu 1.0 OrbitMenu.qml
+OrbitMenuItem 1.0 OrbitMenuItem.qml
+OrbitToolTip 1.0 OrbitToolTip.qml
+DialogSurface 1.0 DialogSurface.qml
+DownloadRow 1.0 DownloadRow.qml
+DownloadTable 1.0 DownloadTable.qml
+DetailsPane 1.0 DetailsPane.qml
+StatusBar 1.0 StatusBar.qml
+FileTile 1.0 FileTile.qml
+SegmentedControl 1.0 SegmentedControl.qml
+FormField 1.0 FormField.qml
+SettingsGroup 1.0 SettingsGroup.qml
+SettingsRow 1.0 SettingsRow.qml
+KeyCap 1.0 KeyCap.qml
+SpeedGraph 1.0 SpeedGraph.qml
+SpeedHistory 1.0 SpeedHistory.qml
+ConfirmDialog 1.0 ConfirmDialog.qml
+UpdateDialog 1.0 UpdateDialog.qml
+Toast 1.0 Toast.qml
+RenameDialog 1.0 RenameDialog.qml
+FileConflictDialog 1.0 FileConflictDialog.qml
+RefreshLinkDialog 1.0 RefreshLinkDialog.qml
+DownloadOptionsDialog 1.0 DownloadOptionsDialog.qml
+ChecksumDialog 1.0 ChecksumDialog.qml
+WhenDoneDialog 1.0 WhenDoneDialog.qml
+ClipboardPrompt 1.0 ClipboardPrompt.qml
+TabStrip 1.0 TabStrip.qml
+PieceMap 1.0 PieceMap.qml
+TorrentDetailsView 1.0 TorrentDetailsView.qml
+DayPicker 1.0 DayPicker.qml

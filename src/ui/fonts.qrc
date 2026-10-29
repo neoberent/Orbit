@@ -1,0 +1,8 @@
+<RCC>
+    <qresource prefix="/fonts">
+        <file alias="Inter-Regular.ttf">assets/fonts/Inter-Regular.ttf</file>
+        <file alias="Inter-Medium.ttf">assets/fonts/Inter-Medium.ttf</file>
+        <file alias="Inter-SemiBold.ttf">assets/fonts/Inter-SemiBold.ttf</file>
+        <file alias="Inter-Bold.ttf">assets/fonts/Inter-Bold.ttf</file>
+    </qresource>
+</RCC>

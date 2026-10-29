@@ -1,0 +1,270 @@
+﻿ORBIT DOWNLOAD MANAGER
+DATENSCHUTZHINWEISE / PRIVACY POLICY
+
+Stand / Last updated: 2026-10-29
+
+========================================================================================
+DEUTSCH (maßgebliche Fassung)
+========================================================================================
+
+Diese Hinweise erklären nach Art. 13 DSGVO, welche Daten die Software Orbit Download Manager
+("Orbit") speichert und überträgt. Kurz gesagt: Orbit hat keine Telemetrie, keine Konten und
+keine Werbung. Fast alles bleibt auf Ihrem Gerät.
+
+1. VERANTWORTLICHER
+
+Neo Berent
+Zuckmayerstr. 3
+65582 Diez
+Deutschland
+E-Mail: neo.berent1@gmail.com
+
+Ein Datenschutzbeauftragter ist nicht bestellt, da hierzu keine gesetzliche Pflicht besteht.
+
+2. KEINE TELEMETRIE, KEINE KONTEN
+
+Orbit erfordert kein Benutzerkonto, erhebt keine Analyse- oder Nutzungsdaten und enthält
+keine Werbe- oder Tracking-Bausteine. Ihre Download-Liste, Dateinamen und Einstellungen
+werden nie an mich oder an Dritte übertragen.
+
+3. LOKAL GESPEICHERTE DATEN
+
+Orbit speichert nur auf Ihrem Gerät (Windows: %APPDATA%\Orbit; Linux: ~/.config/Orbit und
+~/.local/share/orbit; im portablen Modus: Ordner "Data" neben dem Programm):
+
+  - Einstellungen (Design, Zielordner, Verbindungen, Zeitplan, Proxy),
+  - die Download-Liste und den Stand laufender Downloads, damit sie fortgesetzt werden können,
+  - neben jeder unfertigen Datei eine kleine Fortsetzungsdatei (.orbitresume),
+  - für BitTorrent einen Zwischenspeicher der DHT-Routingtabelle,
+  - ggf. eine aktualisierte Kopie von yt-dlp im Unterordner "tools",
+  - eine Protokolldatei mit technischen Meldungen zur Fehlersuche,
+  - ein Proxy-Passwort, falls gesetzt, verschlüsselt für Ihr Benutzerkonto (Windows: DPAPI;
+    Linux: AES-256-GCM mit einer nur für Ihr Konto lesbaren Schlüsseldatei),
+  - Browser-Cookies, die die Erweiterung übergibt (Abschnitt 4), nur bis der jeweilige
+    Download fertig ist; danach werden sie gelöscht,
+  - beim Fernzugriff (Abschnitt 5) einen gesalzenen Hash Ihres Passworts.
+
+Diese Daten verarbeite ich nicht; sie liegen allein bei Ihnen. Sie werden beim Löschen des
+Datenordners entfernt (die Deinstallation bietet das an; unter Linux "uninstall.sh --purge").
+
+4. BROWSER-ERWEITERUNG UND ZWISCHENABLAGE
+
+Die optionale Browser-Erweiterung übergibt einen Download direkt an Orbit auf demselben Gerät
+(Native Messaging, lokale Verbindung nur für Ihr Benutzerkonto): Link, Adresse der Seite,
+User-Agent, vorgeschlagenen Dateinamen und, nur wenn Sie es in der Erweiterung erlauben, die
+Cookies für diesen Link. Orbit sendet diese Cookies nur an die Website, zu der sie gehören.
+Ist die Überwachung der Zwischenablage eingeschaltet, prüft Orbit kopierten Text auf
+Download-Links; der Text wird nicht gespeichert.
+
+5. FERNZUGRIFF (OPTIONAL, STANDARDMÄSSIG AUS)
+
+Der Fernzugriff startet einen kleinen Webserver, der nur auf Ihrem eigenen Gerät
+(127.0.0.1) lauscht. Orbit öffnet ihn nicht selbst ins Netzwerk oder Internet. Machen Sie
+ihn über einen eigenen Tunnel- oder Weiterleitungsdienst erreichbar, gelten dessen
+Datenschutzbedingungen.
+
+6. NETZWERKVERBINDUNGEN
+
+Orbit verbindet sich nur mit Adressen, die Sie vorgeben oder die sich aus einem von Ihnen
+gestarteten Download ergeben, sowie für die folgenden Update-Prüfungen. Dabei erhält die
+Gegenstelle, wie bei jeder Internetverbindung, Ihre IP-Adresse.
+
+  a) Downloads: die Server, die Sie angeben; bei Medien-Links die jeweilige Plattform
+     (über yt-dlp). Bei BitTorrent außerdem Tracker, ergänzend eine Liste öffentlicher
+     Tracker (nur bei nicht privaten Torrents), das öffentliche DHT-Netz und andere
+     Teilnehmer des Torrents. Ihre IP-Adresse ist dabei für andere Teilnehmer sichtbar, und
+     solange ein Torrent aktiv ist, lädt Orbit Teile davon zu anderen hoch. Diese
+     Verbindungen stellen Sie selbst her; ich bin daran nicht beteiligt.
+
+  b) Update-Prüfung: kurz nach dem Start und alle paar Stunden lädt Orbit die Datei
+     https://orbitdm.netlify.app/updates.json. Die Website wird bei Netlify, Inc., 101 2nd
+     Street, San Francisco, CA 94105, USA, als Auftragsverarbeiter (Art. 28 DSGVO) gehostet,
+     der dabei technische Zugriffsdaten (IP-Adresse, Zeitpunkt, Programmversion im
+     User-Agent) in Server-Logs speichert. Ich werte diese nicht aus. Rechtsgrundlage ist
+     Art. 6 Abs. 1 lit. f DSGVO; mein berechtigtes Interesse ist, Sie über Sicherheits- und
+     Fehlerbehebungen zu informieren. Sie können die Prüfung unter Einstellungen > Über
+     abschalten. Installieren Sie ein Update, wird es von GitHub (Buchstabe c) geladen.
+
+  c) Updates und yt-dlp über GitHub: Updates von Orbit liegen auf GitHub Releases. Etwa
+     einmal am Tag und nach einem fehlgeschlagenen Medien-Download fragt Orbit außerdem
+     api.github.com nach der neuesten Version des Open-Source-Projekts yt-dlp und lädt sie
+     ggf. mit ihrer Prüfsummenliste. Abschaltbar unter Einstellungen > Medien. Anbieter ist
+     GitHub, Inc., 88 Colin P. Kelly Jr. Street, San Francisco, CA 94107, USA, der diese
+     Daten in eigener Verantwortung verarbeitet.
+
+  d) Haben Sie unter Einstellungen > Netzwerk einen Proxy eingerichtet, laufen diese
+     Verbindungen über ihn.
+
+Netlify und GitHub sind nach dem EU-US Data Privacy Framework zertifiziert; für diese
+Unternehmen hat die EU-Kommission ein angemessenes Datenschutzniveau festgestellt
+(Angemessenheitsbeschluss vom 10. Juli 2023, Art. 45 DSGVO). Die Server-Logs werden nur so
+lange gespeichert, wie es für den sicheren Betrieb nötig ist.
+
+7. IHRE RECHTE
+
+Sie haben das Recht auf Auskunft (Art. 15 DSGVO), Berichtigung (Art. 16), Löschung (Art. 17),
+Einschränkung der Verarbeitung (Art. 18) und Datenübertragbarkeit (Art. 20). Soweit ich Daten
+auf Grundlage von Art. 6 Abs. 1 lit. f DSGVO verarbeite, können Sie aus Gründen, die sich aus
+Ihrer besonderen Situation ergeben, jederzeit widersprechen (Art. 21 DSGVO). Eine formlose
+Nachricht an neo.berent1@gmail.com genügt.
+
+Sie können sich bei einer Datenschutz-Aufsichtsbehörde beschweren (Art. 77 DSGVO). Für mich
+zuständig ist: Der Landesbeauftragte für den Datenschutz und die Informationsfreiheit
+Rheinland-Pfalz, Hintere Bleiche 34, 55116 Mainz.
+
+Eine automatisierte Entscheidungsfindung einschließlich Profiling (Art. 22 DSGVO) findet
+nicht statt. Sie sind nicht verpflichtet, Daten bereitzustellen; ohne Internetverbindung
+kann Orbit jedoch nichts herunterladen.
+
+8. ÄNDERUNGEN
+
+Ändern sich diese Hinweise, zeigt die Installation der neuen Version sie erneut an. Die
+aktuelle Fassung steht auch unter https://orbitdm.netlify.app/datenschutz.
+
+========================================================================================
+ENGLISH (translation; the German version above prevails)
+========================================================================================
+
+This Privacy Policy describes what data Orbit Download Manager ("Orbit", "the Software")
+stores and transmits, and what it does not. The publisher and controller is named in
+section 7.
+
+1. NO TELEMETRY, NO ACCOUNTS
+
+Orbit does not require an account or sign-in, does not collect analytics or usage
+statistics, and does not contain any advertising or tracking SDKs. Apart from the optional
+update checks described in Section 5, Orbit does not contact any server operated by the
+publisher.
+
+2. DATA STORED LOCALLY ON YOUR DEVICE
+
+To function, Orbit stores the following data locally, in your per-user application data
+folder (on Windows: %APPDATA%\Orbit; on Linux: ~/.config/Orbit for settings and
+~/.local/share/orbit for everything else; in portable mode on either system: a "Data" folder
+next to the Orbit program), and never transmits it to the publisher:
+
+  - Application settings (theme, download directory, connection limits, schedule, proxy).
+  - Your list of downloads and their state, so in-progress transfers can resume after the
+    application is closed and reopened.
+  - A resume-metadata sidecar file next to each partially downloaded file, recording which
+    byte ranges have already been written.
+  - For BitTorrent transfers, a cache of the DHT (Distributed Hash Table) routing table, so
+    peer discovery does not have to restart from scratch on every launch.
+  - An updated copy of yt-dlp, if Orbit has downloaded one (see Section 5), in a "tools"
+    subfolder.
+  - A local log file containing diagnostic messages (connection attempts, errors), useful
+    for troubleshooting. This log never leaves your device unless you choose to share it
+    yourself.
+  - If you set a proxy password, it is stored encrypted for your user account (on Windows
+    with the Windows Data Protection API; on Linux with a key file in the folder above
+    that only your user account can read).
+  - Browser cookies handed over by the Orbit browser extension (see Section 3) are kept with
+    the download they belong to until it has finished, and are then deleted.
+
+Backups you export from Settings contain your settings and, if you choose, your download
+list. They never contain passwords or browser cookies.
+
+Uninstalling Orbit through Windows "Apps & features" removes the installed program files.
+You may separately delete %APPDATA%\Orbit to remove the data described above; the
+uninstaller will offer to do this for you. On Linux, ~/.local/lib/orbit/uninstall.sh removes
+the program files, and "uninstall.sh --purge" also removes the data described above.
+
+3. BROWSER EXTENSION AND CLIPBOARD
+
+The optional Orbit browser extension sends a download you hand to Orbit directly to Orbit on
+the same device, through the browser's native messaging feature and a local connection that
+only your user account can use. For each download it sends the link, the address of
+the page it came from, your browser's user agent, the file name the browser suggested and,
+only if you have allowed it in the extension, the browser's cookies for that link, so
+downloads that need you to be signed in work. Orbit uses these cookies only for requests to
+the website they belong to and does not send them anywhere else.
+
+When clipboard monitoring is turned on (Settings > General), Orbit reads text you copy in
+other applications to look for download links. The text is not stored, and nothing is
+downloaded unless you choose to.
+
+4. REMOTE / WEB ACCESS (OPTIONAL)
+
+Orbit includes an optional Remote Access feature, disabled by default, that lets you manage
+your downloads from a phone or other device through a browser. When you enable it in
+Settings and set a password:
+
+  - Orbit stores a salted hash of that password on your device (never the plaintext
+    password) alongside the other application settings described in Section 2.
+  - Orbit starts a small web server that listens only on your own device
+    (127.0.0.1/localhost) on the port you choose. Orbit does not open this server to your
+    network or the internet by itself; reaching it from another device is only possible if
+    you separately set up a tunnel or forwarding tool of your own choosing, which is outside
+    Orbit's control.
+  - A short-lived session cookie is issued to your browser after you log in, and is used only
+    to authenticate requests to this local server.
+
+Disabling Remote Access stops the server; deleting the stored password from Settings removes
+the saved password hash.
+
+5. NETWORK CONNECTIONS
+
+Orbit makes network connections only to addresses you direct it to, or that are a direct
+consequence of a transfer you started, plus the update checks below:
+
+  - HTTP(S) downloads: to the URL you provide.
+  - Media downloads: to the website of the link you provide, through yt-dlp (bundled with
+    Orbit on Windows; on Linux, the copy installed on your system).
+  - BitTorrent: to trackers referenced by a torrent or magnet link you add, to a
+    supplementary list of well-known public trackers (added only for torrents that are not
+    marked private, to widen peer discovery), to the public BitTorrent DHT network, and to
+    other peers in a torrent's swarm, as is inherent to how the BitTorrent protocol works.
+    While a torrent is active, Orbit may also upload pieces of that torrent's data to other
+    peers (this is normal BitTorrent "seeding" behavior, not a separate data-sharing
+    feature).
+  - Update check: shortly after launch and every few hours, Orbit downloads a small file
+    describing the latest version from the Orbit website. The request contains no personal
+    data beyond what any web request reveals (such as your IP address). You can turn it off
+    in Settings > About. If you choose to install an update, the installer is downloaded
+    from the address listed in that file.
+  - yt-dlp updates: about once a day, and after a media download fails, Orbit asks GitHub
+    (api.github.com) for the latest release of the open-source yt-dlp project and, when a
+    newer one exists, downloads it and its published checksum list from github.com. The
+    request contains no personal data beyond what any web request reveals (such as your IP
+    address), and GitHub's own privacy statement applies to it. You can turn it off in
+    Settings > Media.
+  - If you configure a proxy in Settings > Network, these connections go through that proxy.
+
+Orbit does not send your download history, file names, or any other locally stored data to
+the publisher or to any third party.
+
+6. THIRD-PARTY COMPONENTS
+
+Orbit is built on open-source components (Qt, libcurl, OpenSSL, libtorrent-rasterbar,
+yt-dlp, FFmpeg) that handle networking and media processing on Orbit's behalf. On Linux,
+Orbit also uses services of your desktop session (the systemd login manager and the desktop
+portal for power management, your file manager, and the desktop's clipboard manager) only
+on your own device. These
+components do not independently transmit data beyond what is described in Section 5.
+
+7. CONTROLLER, LEGAL BASIS AND YOUR RIGHTS
+
+The controller under the GDPR is Neo Berent, Zuckmayerstr. 3, 65582 Diez, Germany,
+neo.berent1@gmail.com. No data protection officer is appointed, as none is legally required.
+
+The update check is served by the Orbit website, hosted by Netlify, Inc. (101 2nd Street,
+San Francisco, CA 94105, USA) as a processor (Art. 28 GDPR), which keeps technical access
+logs (IP address, time, the Orbit version in the user agent). Updates and yt-dlp are
+downloaded from GitHub, Inc. (88 Colin P. Kelly Jr. Street, San Francisco, CA 94107, USA),
+which processes this data as its own controller. Both are certified under the EU-US Data
+Privacy Framework (EU adequacy decision of 10 July 2023, Art. 45 GDPR). The legal basis is
+Art. 6(1)(f) GDPR: the legitimate interest in letting you know about security and bug fixes.
+
+You have the right of access (Art. 15 GDPR), rectification (Art. 16), erasure (Art. 17),
+restriction of processing (Art. 18), data portability (Art. 20) and to object to processing
+based on Art. 6(1)(f) (Art. 21). An informal email is enough. You may lodge a complaint with
+a supervisory authority (Art. 77 GDPR); the one responsible for the publisher is Der
+Landesbeauftragte für den Datenschutz und die Informationsfreiheit Rheinland-Pfalz, Hintere
+Bleiche 34, 55116 Mainz, Germany. There is no automated decision-making or profiling
+(Art. 22 GDPR).
+
+8. CHANGES TO THIS POLICY
+
+If this policy changes in a future version of Orbit, the updated version will be presented
+again during that version's installation. The current version is also available at
+https://orbitdm.netlify.app/datenschutz.

@@ -1,0 +1,16 @@
+build/
+build-vcpkg/
+build-linux/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+installer/Output/
+aqtinstall.log
+installer/aur/.aur/
+installer/aur/*/src/
+installer/aur/*/pkg/
+installer/aur/*/*.pkg.tar.zst
+installer/aur/*/*.tar.gz
+installer/aur/*/*.zip
