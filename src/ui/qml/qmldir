@@ -28,6 +28,17 @@ SegmentedControl 1.0 SegmentedControl.qml
 FormField 1.0 FormField.qml
 SettingsGroup 1.0 SettingsGroup.qml
 SettingsRow 1.0 SettingsRow.qml
+ValueChip 1.0 ValueChip.qml
+StepText 1.0 StepText.qml
+SettingsGeneralTab 1.0 SettingsGeneralTab.qml
+SettingsDownloadsTab 1.0 SettingsDownloadsTab.qml
+SettingsNetworkTab 1.0 SettingsNetworkTab.qml
+SettingsTorrentTab 1.0 SettingsTorrentTab.qml
+SettingsMediaTab 1.0 SettingsMediaTab.qml
+SettingsBrowserTab 1.0 SettingsBrowserTab.qml
+SettingsScheduleTab 1.0 SettingsScheduleTab.qml
+SettingsRemoteTab 1.0 SettingsRemoteTab.qml
+SettingsAboutTab 1.0 SettingsAboutTab.qml
 KeyCap 1.0 KeyCap.qml
 SpeedGraph 1.0 SpeedGraph.qml
 SpeedHistory 1.0 SpeedHistory.qml

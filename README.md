@@ -9,21 +9,28 @@ combining multi-connection (segmented) HTTP/HTTPS downloads with full BitTorrent
 ## Architecture
 
 ```
-include/core/     Toolkit-agnostic download engine headers (no Qt dependency)
+include/core/     Download engine and service headers
 include/utils/    Small logging/string/filesystem helpers used by core and UI
 src/core/         Implementation of DownloadManager, HttpDownloader (libcurl),
                    TorrentEngine (libtorrent-rasterbar), DownloadTask
 src/utils/        Implementation of the utils headers
 src/ui/           Qt Widgets + Qt Quick front end
 src/ui/qml/       QML components (main window, dialogs, list delegate, theme)
+tests/            Qt Test suites and a local test HTTP server
 installer/        Inno Setup script and packaged legal documents for the Windows installer
 ```
 
-The **core** library (`orbit_core`) is a standalone static library with zero Qt dependency —
-it can be embedded in a CLI or headless service exactly as it is embedded in the GUI. The
-**ui** executable (`orbit`) only talks to the core through `DownloadManager`'s public API
-and its callback-based `ProgressReporter`, which `DownloadListModel` adapts into Qt signals
-for QML data binding.
+The code is split into two static libraries and the GUI:
+
+- **`orbit_core`** — the download engine (`DownloadManager`, `HttpDownloader` on libcurl,
+  `TorrentEngine` on libtorrent-rasterbar, `MediaDownloader`, persistence). It links only
+  `Qt6::Core` (`MediaDownloader` drives yt-dlp through `QProcess`) — no GUI or network modules.
+- **`orbit_services`** — the app-level services built on the core: the remote web UI
+  (`RemoteServer` and its embedded assets), `SingleInstanceGuard`, `ProtocolHandler` and
+  `Scheduler`. It adds `Qt6::Network`.
+- **`orbit`** — the Qt Widgets + Qt Quick executable. It only talks to the core through
+  `DownloadManager`'s public API and its callback-based `ProgressReporter`, which
+  `DownloadListModel` adapts into Qt signals for QML data binding.
 
 ## Features
 
@@ -123,6 +130,25 @@ source instead — Orbit's `TorrentEngine` uses the libtorrent 2.x API
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
+
+## Building & testing
+
+The test suites (Qt Test, under `tests/`) are off by default. A Debug build with
+AddressSanitizer and UndefinedBehaviorSanitizer is the recommended way to run them:
+
+```bash
+cmake -B build-tests -G Ninja -DCMAKE_BUILD_TYPE=Debug -DORBIT_BUILD_TESTS=ON -DORBIT_SANITIZE=ON
+cmake --build build-tests --parallel
+ctest --test-dir build-tests --output-on-failure
+```
+
+The suites cover the utilities, the segmented HTTP downloader (against a local test server
+with ranges, throttling and hangs), `DownloadManager` (resume after restart, export/import,
+queue limit, checksums, name conflicts) and the remote web UI (assets, login, sessions,
+lockout). Each test runs with its own private `HOME`, so your real profile is never touched.
+
+GitHub Actions (`.github/workflows/ci.yml`) builds and runs the same configuration on Arch
+Linux for every push to `main` and every pull request.
 
 ## Run
 
@@ -243,7 +269,7 @@ With none set, the build still works and produces an unsigned installer (with a 
   (a paused/resumed download restarts from byte 0).
 - The "file already exists" choice applies to direct downloads; media downloads keep yt-dlp's
   own behaviour of not downloading a video that is already there.
-- No CLI/headless front end ships yet, though `orbit_core` was designed to support one.
+- No CLI/headless front end ships yet, though `orbit_core` has no GUI dependency and can host one.
 - macOS packaging is not set up yet. The Linux archive uses the distribution's Qt 6 and
   libtorrent rather than bundling them.
 - On GNOME under Wayland, links copied while Orbit is in the background aren't noticed

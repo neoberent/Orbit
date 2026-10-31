@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linux:
+    name: Linux (build + tests, ASan/UBSan)
+    runs-on: ubuntu-latest
+    # Arch matches the AUR package's toolchain and has current Qt 6 and libtorrent 2.
+    container: archlinux:latest
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel cmake ninja pkgconf git \
+            qt6-base qt6-declarative libtorrent-rasterbar curl openssl libxcb
+
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DORBIT_BUILD_TESTS=ON
+          -DORBIT_SANITIZE=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        env:
+          # Make any undefined behaviour fail the test instead of only printing a warning.
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build --output-on-failure -j2
