@@ -42,14 +42,16 @@ private:
     // A raw HTTP/1.1 exchange; the server answers and closes, and its event loop runs on
     // this thread, so the reply is awaited with QTest's event-processing waits.
     Reply send(const QByteArray& method, const QByteArray& path, const QByteArray& body = {},
-               const QByteArray& cookie = {}) {
+               const QByteArray& cookie = {}, const QByteArray& host = "127.0.0.1") {
         QTcpSocket socket;
         socket.connectToHost(QHostAddress::LocalHost, server_->port());
         QElapsedTimer timer;
         timer.start();
         while (socket.state() != QAbstractSocket::ConnectedState && timer.elapsed() < 3000) QTest::qWait(5);
         if (socket.state() != QAbstractSocket::ConnectedState) return {};
-        QByteArray request = method + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n";
+        QByteArray request = method + " " + path + " HTTP/1.1\r\n";
+        if (!host.isEmpty()) request += "Host: " + host + "\r\n";
+        request += "Connection: close\r\n";
         if (!cookie.isEmpty()) request += "Cookie: " + cookie + "\r\n";
         if (!body.isEmpty()) request += "Content-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\n";
         request += "\r\n" + body;
@@ -153,6 +155,43 @@ private slots:
         QCOMPARE(send("GET", "/no/such/page").status, 401);
         const Reply login = send("POST", "/api/login", R"({"username":"admin","password":"correct horse"})");
         QCOMPARE(send("GET", "/no/such/page", {}, sessionCookie(login)).status, 404);
+    }
+
+    // DNS rebinding: a web page that points its own domain at 127.0.0.1 reaches the
+    // dashboard with its own name in Host. Only this PC's names, Cloudflare quick tunnels
+    // and configured tunnel names are answered.
+    void answersOnlyKnownHosts_data() {
+        QTest::addColumn<QByteArray>("host");
+        QTest::addColumn<int>("status");
+        const QByteArray port = ":" + QByteArray::number(freePort());
+        QTest::newRow("127.0.0.1") << QByteArray("127.0.0.1") + port << 200;
+        QTest::newRow("localhost") << QByteArray("LocalHost") + port << 200;
+        QTest::newRow("ipv6 loopback") << QByteArray("[::1]") + port << 200;
+        QTest::newRow("quick tunnel") << QByteArray("calm-river-1234.trycloudflare.com") << 200;
+        QTest::newRow("named tunnel") << QByteArray("orbit.example.com") << 200;
+        QTest::newRow("named tunnel, trailing dot") << QByteArray("orbit.example.com.") << 200;
+        QTest::newRow("no host header") << QByteArray() << 200;
+        QTest::newRow("rebinding domain") << QByteArray("evil.example.net") + port << 421;
+        QTest::newRow("lookalike suffix") << QByteArray("trycloudflare.com.evil.net") << 421;
+        QTest::newRow("lookalike tunnel") << QByteArray("xorbit.example.com") << 421;
+        QTest::newRow("loopback as name") << QByteArray("127.0.0.1.nip.io") << 421;
+    }
+
+    void answersOnlyKnownHosts() {
+        QFETCH(QByteArray, host);
+        QFETCH(int, status);
+        server_->setAllowedHosts({QStringLiteral("https://Orbit.Example.com/")});
+        QCOMPARE(send("GET", "/", {}, {}, host).status, status);
+        const Reply login = send("POST", "/api/login", R"({"username":"admin","password":"correct horse"})", {}, host);
+        QCOMPARE(login.status, status);
+    }
+
+    void normalizesHostNames() {
+        QCOMPARE(RemoteServer::normalizeHost(QStringLiteral(" HTTPS://user@Orbit.Example.com:8443/path ")),
+                 QStringLiteral("orbit.example.com"));
+        QCOMPARE(RemoteServer::normalizeHost(QStringLiteral("[::1]:8765")), QStringLiteral("::1"));
+        QCOMPARE(RemoteServer::normalizeHost(QStringLiteral("localhost")), QStringLiteral("localhost"));
+        QCOMPARE(RemoteServer::normalizeHost(QString()), QString());
     }
 };
 

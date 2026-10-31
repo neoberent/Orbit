@@ -74,6 +74,7 @@ QByteArray httpStatusText(int status) {
         case 405: return "Method Not Allowed";
         case 410: return "Gone";
         case 413: return "Payload Too Large";
+        case 421: return "Misdirected Request";
         case 429: return "Too Many Requests";
         case 503: return "Service Unavailable";
         default: return "Internal Server Error";
@@ -321,7 +322,55 @@ QByteArray RemoteServer::snapshotsPayload() const {
     return QJsonDocument(root).toJson(QJsonDocument::Compact);
 }
 
+QString RemoteServer::normalizeHost(const QString& hostOrUrl) {
+    QString h = hostOrUrl.trimmed().toLower();
+    const qsizetype scheme = h.indexOf(QStringLiteral("://"));
+    if (scheme >= 0) h = h.mid(scheme + 3);
+    const qsizetype slash = h.indexOf(u'/');
+    if (slash >= 0) h = h.left(slash);
+    const qsizetype at = h.lastIndexOf(u'@');
+    if (at >= 0) h = h.mid(at + 1);
+    if (h.startsWith(u'[')) {
+        const qsizetype close = h.indexOf(u']');
+        return close > 0 ? h.mid(1, close - 1) : QString();
+    }
+    const qsizetype colon = h.indexOf(u':');
+    if (colon >= 0) h = h.left(colon);
+    while (h.endsWith(u'.')) h.chop(1);
+    return h;
+}
+
+void RemoteServer::setAllowedHosts(const QStringList& hosts) {
+    allowedHosts_.clear();
+    for (const QString& host : hosts) {
+        const QString h = normalizeHost(host);
+        if (!h.isEmpty() && !allowedHosts_.contains(h)) allowedHosts_.append(h);
+    }
+}
+
+bool RemoteServer::isAllowedHost(const QString& hostHeader) const {
+    // HTTP/1.1 clients always send Host and browsers can't leave it out, so a request
+    // without one can't be a rebinding attack (e.g. an HTTP/1.0 script).
+    if (hostHeader.trimmed().isEmpty()) return true;
+    const QString h = normalizeHost(hostHeader);
+    if (h == QLatin1String("localhost") || h == QLatin1String("127.0.0.1") || h == QLatin1String("::1")) return true;
+    // Quick tunnel names are under Cloudflare's own zone, so an attacker can't point one
+    // at 127.0.0.1.
+    if (h.endsWith(QLatin1String(".trycloudflare.com"))) return true;
+    return allowedHosts_.contains(h);
+}
+
 void RemoteServer::handleRequest(QTcpSocket* socket, const ParsedHttpRequest& req) {
+    const QString host = req.headers.value(QStringLiteral("host"));
+    if (!isAllowedHost(host)) {
+        ORBIT_LOG_WARN("RemoteServer", "Refused a request for unknown host \"" + host.toStdString() +
+                                           "\" (add it under Settings > Remote > Tunnel address if it's yours)");
+        writeResponse(socket, 421, "text/plain; charset=utf-8",
+                      "Orbit doesn't recognise the address \"" + normalizeHost(host).toUtf8() +
+                          "\".\n\nIf this is your own tunnel, add it in Orbit under Settings > Remote > "
+                          "Tunnel address.\n");
+        return;
+    }
     if (req.method == QLatin1String("GET") && (req.path == QLatin1String("/") || req.path == QLatin1String("/index.html"))) {
         return serveAsset(socket, ":/web/index.html", "text/html; charset=utf-8");
     }

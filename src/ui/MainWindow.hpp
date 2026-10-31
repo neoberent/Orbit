@@ -35,6 +35,8 @@ class MainWindow final : public QObject {
     Q_PROPERTY(bool remoteRunning READ remoteRunning NOTIFY remoteStatusChanged)
     Q_PROPERTY(QString remoteStatusMessage READ remoteStatusMessage NOTIFY remoteStatusChanged)
     Q_PROPERTY(QString remoteLocalUrl READ remoteLocalUrl NOTIFY remoteStatusChanged)
+    // Host name(s) of a named Cloudflare tunnel, comma separated, that the dashboard answers to.
+    Q_PROPERTY(QString remoteTunnelHost READ remoteTunnelHost WRITE setRemoteTunnelHost NOTIFY remoteTunnelHostChanged)
 
     Q_PROPERTY(bool scheduleEnabled READ scheduleEnabled WRITE setScheduleEnabled NOTIFY scheduleChanged)
     Q_PROPERTY(QString scheduleStartTime READ scheduleStartTime WRITE setScheduleStartTime NOTIFY scheduleChanged)
@@ -112,6 +114,8 @@ public:
     [[nodiscard]] bool remoteRunning() const;
     [[nodiscard]] QString remoteStatusMessage() const { return remoteStatusMessage_; }
     [[nodiscard]] QString remoteLocalUrl() const;
+    [[nodiscard]] QString remoteTunnelHost() const { return remoteTunnelHost_; }
+    void setRemoteTunnelHost(const QString& hosts);
 
     Q_INVOKABLE bool setRemoteCredentials(const QString& username, const QString& password);
 
@@ -215,6 +219,7 @@ signals:
 
     void remoteAccessEnabledChanged();
     void remotePortChanged();
+    void remoteTunnelHostChanged();
     void remoteCredentialsChanged();
     void remoteStatusChanged();
     void scheduleChanged();
@@ -245,6 +250,7 @@ private:
     std::unique_ptr<orbit::core::RemoteServer> remoteServer_;
     bool remoteAccessEnabled_{false};
     int remotePort_{8765};
+    QString remoteTunnelHost_;
     QString remoteStatusMessage_;
 
     std::unique_ptr<orbit::core::Scheduler> scheduler_;

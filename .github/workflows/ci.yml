@@ -35,3 +35,76 @@ jobs:
           # Make any undefined behaviour fail the test instead of only printing a warning.
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: ctest --test-dir build --output-on-failure -j2
+
+  windows:
+    name: Windows (MSVC build + tests, staged app)
+    runs-on: windows-2022
+    env:
+      # The same Qt and vcpkg triplet as the release build (see README, "Windows build notes").
+      QT_VERSION: 6.8.3
+      VCPKG_TRIPLET: x64-windows
+      VCPKG_PACKAGES: curl openssl libtorrent
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2022_64
+          cache: true
+
+      # libtorrent (with Boost) takes a long time to build from source, so vcpkg's built
+      # packages are cached between runs, keyed on the vcpkg version and the package list.
+      - name: vcpkg version
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $rev = git -C $env:VCPKG_INSTALLATION_ROOT rev-parse HEAD
+          "rev=$rev" >> $env:GITHUB_OUTPUT
+          New-Item -ItemType Directory -Force "${{ github.workspace }}\vcpkg-cache" | Out-Null
+
+      - name: Restore vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\vcpkg-cache
+          key: vcpkg-${{ env.VCPKG_TRIPLET }}-${{ steps.vcpkg.outputs.rev }}-${{ env.VCPKG_PACKAGES }}
+          restore-keys: vcpkg-${{ env.VCPKG_TRIPLET }}-
+
+      - name: Install libraries
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install --triplet $env:VCPKG_TRIPLET $env:VCPKG_PACKAGES.Split(' ')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Configure
+        shell: pwsh
+        run: >
+          cmake -S . -B build-vcpkg -G "Visual Studio 17 2022" -A x64
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=${{ env.VCPKG_TRIPLET }}
+          -DORBIT_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build-vcpkg --config Release --parallel
+
+      - name: Test
+        shell: pwsh
+        run: |
+          # The test executables find Qt and the vcpkg DLLs on PATH.
+          $env:PATH = "$env:QT_ROOT_DIR\bin;$env:VCPKG_INSTALLATION_ROOT\installed\$env:VCPKG_TRIPLET\bin;$env:PATH"
+          ctest --test-dir build-vcpkg -C Release --output-on-failure
+
+      # orbit.exe with Qt (windeployqt), the vcpkg DLLs and the native-messaging host:
+      # everything installer\Orbit.iss packages except the bundled yt-dlp and ffmpeg.
+      - name: Upload the staged app
+        uses: actions/upload-artifact@v4
+        with:
+          name: orbit-windows-x64
+          path: |
+            build-vcpkg/Release/
+            !build-vcpkg/Release/*.lib
+            !build-vcpkg/Release/*.pdb
+            !build-vcpkg/Release/*.exp
+          retention-days: 14

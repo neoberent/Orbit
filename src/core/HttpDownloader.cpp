@@ -85,9 +85,17 @@ int curlProgressCallback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl
     return 0;
 }
 
-// Lets a probe give up as soon as the downloader starts shutting down.
+// Lets a probe give up as soon as any of its flags is set: the downloader shutting down,
+// or the job it probes for being paused or cancelled. Unused flags are null.
+struct AbortFlags {
+    const std::atomic<bool>* flags[3]{};
+};
+
 int abortOnFlagCallback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
-    return static_cast<const std::atomic<bool>*>(clientp)->load(std::memory_order_relaxed) ? 1 : 0;
+    for (const std::atomic<bool>* flag : static_cast<const AbortFlags*>(clientp)->flags) {
+        if (flag && flag->load(std::memory_order_relaxed)) return 1;
+    }
+    return 0;
 }
 
 struct ProbeContext {
@@ -349,6 +357,10 @@ void HttpDownloader::setProxy(const ProxySettings& proxy) {
     proxy_ = proxy;
 }
 
+void HttpDownloader::setStallTimeout(std::chrono::seconds timeout) {
+    stallTimeoutSeconds_ = std::max<long>(1, static_cast<long>(timeout.count()));
+}
+
 std::string HttpDownloader::netscapeCookieLine(const HttpCookie& cookie) { return netscapeLine(cookie); }
 
 void HttpDownloader::applyRequestOptions(void* handle, const DownloadRequest& request) const {
@@ -443,8 +455,9 @@ RemoteProbe HttpDownloader::probe(const DownloadRequest& request) const {
             curl_easy_setopt(curl, CURLOPT_RANGE, "0-0");
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, discardWriteCallback);
             curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+            AbortFlags abort{{&shuttingDown_}};
             curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abortOnFlagCallback);
-            curl_easy_setopt(curl, CURLOPT_XFERINFODATA, const_cast<std::atomic<bool>*>(&shuttingDown_));
+            curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &abort);
             long httpCode = 0;
             if (curl_easy_perform(curl) == CURLE_OK) {
                 curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
@@ -491,7 +504,7 @@ bool HttpDownloader::rewriteResumeSource(const std::filesystem::path& metaPath, 
 
 bool HttpDownloader::probeRemote(const DownloadRequest& request, std::uint64_t& outSize,
                                  bool& outSupportsRanges, std::string& outFileName,
-                                 std::string& outError) const {
+                                 std::string& outError, const Job* job) const {
     const std::string& url = request.source;
     CURL* curl = curl_easy_init();
     if (!curl) {
@@ -513,8 +526,9 @@ bool HttpDownloader::probeRemote(const DownloadRequest& request, std::uint64_t& 
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    AbortFlags abort{{&shuttingDown_, job ? &job->paused : nullptr, job ? &job->cancelStart : nullptr}};
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abortOnFlagCallback);
-    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, const_cast<std::atomic<bool>*>(&shuttingDown_));
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &abort);
 
     CURLcode res = curl_easy_perform(curl);
     long httpCode = 0;
@@ -581,7 +595,7 @@ void HttpDownloader::runSupervisor(DownloadId id) {
         bool supportsRanges = false;
         std::string fileName;
         std::string probeError;
-        if (probeRemote(job.request, remoteSize, supportsRanges, fileName, probeError) && remoteSize > 0 &&
+        if (probeRemote(job.request, remoteSize, supportsRanges, fileName, probeError, &job) && remoteSize > 0 &&
             remoteSize != job.totalBytes) {
             ORBIT_LOG_WARN("HttpDownloader", "Size on the server changed (" + std::to_string(job.totalBytes) + " -> " +
                                                  std::to_string(remoteSize) + "); restarting " + job.filePath.string());
@@ -599,9 +613,9 @@ void HttpDownloader::runSupervisor(DownloadId id) {
         bool supportsRanges = false;
         std::string fileName;
         std::string probeError;
-        const bool probeOk = probeRemote(job.request, remoteSize, supportsRanges, fileName, probeError);
+        const bool probeOk = probeRemote(job.request, remoteSize, supportsRanges, fileName, probeError, &job);
 
-        if (!probeOk) {
+        if (!probeOk && !job.paused.load() && !job.cancelStart.load()) {
             ORBIT_LOG_WARN("HttpDownloader", "Probe failed for " + job.request.source + ": " + probeError);
         }
 
@@ -862,6 +876,11 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+    // A server that keeps the connection open but stops sending would otherwise hold this
+    // segment forever. Below 1 byte/s for the stall timeout, curl gives up with
+    // CURLE_OPERATION_TIMEDOUT, which is retried like any dropped connection.
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, stallTimeoutSeconds_.load());
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curlProgressCallback);
 

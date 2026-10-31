@@ -100,7 +100,7 @@ private:
             return;
         }
 
-        ++owner_.getRequests_;
+        const int getNumber = ++owner_.getRequests_;
         if (ranged) ++owner_.rangedGetRequests_;
         const int now = ++owner_.concurrentGets_;
         int peak = owner_.peakConcurrentGets_.load();
@@ -109,6 +109,10 @@ private:
         connect(socket, &QTcpSocket::disconnected, socket, [this] { --owner_.concurrentGets_; });
 
         const QByteArray body = b.payload.mid(first, last - first + 1);
+        if (getNumber <= b.stallGets) {
+            socket->write(body.left(b.stallAfterBytes));
+            return;  // never finishes and never closes
+        }
         if (b.bytesPerTick <= 0) {
             socket->write(body);
             socket->disconnectFromHost();
