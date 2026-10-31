@@ -364,11 +364,11 @@ void RemoteServer::handleRequest(QTcpSocket* socket, const ParsedHttpRequest& re
     const QString host = req.headers.value(QStringLiteral("host"));
     if (!isAllowedHost(host)) {
         ORBIT_LOG_WARN("RemoteServer", "Refused a request for unknown host \"" + host.toStdString() +
-                                           "\" (add it under Settings > Remote > Tunnel address if it's yours)");
+                                           "\" (if it's your tunnel, enter it in Settings > Remote Access, Named Tunnel step 6)");
         writeResponse(socket, 421, "text/plain; charset=utf-8",
                       "Orbit doesn't recognise the address \"" + normalizeHost(host).toUtf8() +
-                          "\".\n\nIf this is your own tunnel, add it in Orbit under Settings > Remote > "
-                          "Tunnel address.\n");
+                          "\".\n\nIf this is your own Cloudflare tunnel, enter its hostname in Orbit under "
+                          "Settings > Remote Access (Named Tunnel, step 6).\n");
         return;
     }
     if (req.method == QLatin1String("GET") && (req.path == QLatin1String("/") || req.path == QLatin1String("/index.html"))) {
