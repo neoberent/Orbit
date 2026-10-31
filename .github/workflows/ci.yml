@@ -172,11 +172,14 @@ jobs:
           $url = 'https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/LICENSE'
           $add = python .github\scripts\native_message.py $hostExe ('{"type":"add","url":"' + $url + '","filename":"orbit-ci-license.txt"}') | ConvertFrom-Json
           if (-not $add.ok) { throw "add failed: $($add | ConvertTo-Json -Compress)" }
+          # Compared with a plain fetch of the same URL (the checkout's LICENSE has CRLF line endings).
+          $reference = Join-Path $env:RUNNER_TEMP 'reference.txt'
+          Invoke-WebRequest $url -OutFile $reference
           $file = Join-Path $env:USERPROFILE 'Downloads\orbit-ci-license.txt'
           $deadline = (Get-Date).AddSeconds(60)
-          while (-not ((Test-Path $file) -and ((Get-Item $file).Length -eq (Get-Item LICENSE).Length)) -and (Get-Date) -lt $deadline) { Start-Sleep 1 }
+          while (-not ((Test-Path $file) -and ((Get-Item $file).Length -eq (Get-Item $reference).Length)) -and (Get-Date) -lt $deadline) { Start-Sleep 1 }
           if (-not (Test-Path $file)) { throw 'the download never arrived' }
-          if ((Get-FileHash $file).Hash -ne (Get-FileHash LICENSE).Hash) { throw 'the downloaded file differs from LICENSE' }
+          if ((Get-FileHash $file).Hash -ne (Get-FileHash $reference).Hash) { throw 'the downloaded file differs from the original' }
           Write-Host 'Orbit downloaded a file through the native host.'
           & (Join-Path $dir 'yt-dlp.exe') --version
           Get-Content (Join-Path $env:APPDATA 'Orbit\orbit.log') -ErrorAction SilentlyContinue | Select-Object -Last 15
