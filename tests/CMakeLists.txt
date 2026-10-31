@@ -6,7 +6,8 @@ target_link_libraries(orbit_test_support PUBLIC Qt6::Core Qt6::Network)
 function(orbit_add_test name)
     add_executable(${name} ${name}.cpp)
     target_link_libraries(${name} PRIVATE ${ARGN} orbit_test_support Qt6::Test)
-    add_test(NAME ${name} COMMAND ${name})
+    # Results go to the console and to <name>.log, which CI prints when a test fails.
+    add_test(NAME ${name} COMMAND ${name} -o "${CMAKE_CURRENT_BINARY_DIR}/${name}.log,txt" -o -,txt)
     # Each test gets a private HOME/XDG tree, so nothing touches the real profile.
     set_tests_properties(${name} PROPERTIES
         TIMEOUT 300

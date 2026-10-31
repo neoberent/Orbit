@@ -276,13 +276,15 @@ private slots:
 
     // The stall check must not mistake a download held back by a speed cap for a dead one.
     void speedCapIsNotMistakenForAStall() {
-        const QByteArray payload = randomPayload(96 * 1024);
+        // 8 KB/s shared by up to 4 connections holds each one back for seconds at a time,
+        // far longer than the 1 s stall timeout.
+        const QByteArray payload = randomPayload(64 * 1024);
         server_->setBehaviour({.payload = payload});
         QTemporaryDir dir;
         Recorder rec;
         HttpDownloader dl(rec.reporter());
         dl.setStallTimeout(1s);
-        dl.setGlobalSpeedLimit(16 * 1024);
+        dl.setGlobalSpeedLimit(8 * 1024);
         dl.start(1, request(dir, "file.bin", 4));
         QVERIFY2(rec.waitForState(1, DownloadState::Completed, 30s), rec.error(1).c_str());
         QCOMPARE(readFile(rec.path(1)), payload);
@@ -347,7 +349,8 @@ private slots:
             out << "source=https://old/link\ntotal=100\n";
         }
         QVERIFY(HttpDownloader::rewriteResumeSource(meta, "https://new/link"));
-        const QByteArray text = readFile(meta);
+        // Text mode: Windows writes CRLF line endings.
+        const QByteArray text = readFile(meta).replace("\r\n", "\n");
         QVERIFY(text.contains("source=https://new/link\n"));
         QVERIFY(text.contains("total=100\n"));
         QVERIFY(!text.contains("old"));
