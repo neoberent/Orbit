@@ -66,7 +66,8 @@ jobs:
           New-Item -ItemType Directory -Force "${{ github.workspace }}\vcpkg-cache" | Out-Null
 
       - name: Restore vcpkg packages
-        uses: actions/cache@v4
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}\vcpkg-cache
           key: vcpkg-${{ env.VCPKG_TRIPLET }}-${{ steps.vcpkg.outputs.rev }}-${{ env.VCPKG_PACKAGES }}
@@ -77,6 +78,14 @@ jobs:
         run: |
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install --triplet $env:VCPKG_TRIPLET $env:VCPKG_PACKAGES.Split(' ')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Saved straight away, so a later failing step doesn't throw an hour of building away.
+      - name: Save vcpkg packages
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}\vcpkg-cache
+          key: vcpkg-${{ env.VCPKG_TRIPLET }}-${{ steps.vcpkg.outputs.rev }}-${{ env.VCPKG_PACKAGES }}
 
       - name: Configure
         shell: pwsh
@@ -96,15 +105,94 @@ jobs:
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:VCPKG_INSTALLATION_ROOT\installed\$env:VCPKG_TRIPLET\bin;$env:PATH"
           ctest --test-dir build-vcpkg -C Release --output-on-failure
 
-      # orbit.exe with Qt (windeployqt), the vcpkg DLLs and the native-messaging host:
-      # everything installer\Orbit.iss packages except the bundled yt-dlp and ffmpeg.
-      - name: Upload the staged app
+      - name: Test results
+        if: failure()
+        shell: pwsh
+        run: Get-ChildItem build-vcpkg\tests\*.log | ForEach-Object { "=== $($_.Name)"; Get-Content $_ | Select-String -Pattern 'FAIL|Loc:|Actual|Expected|Totals|QWARN' }
+
+      # The release bundles yt-dlp and a static ffmpeg (BtbN's GPL build) next to orbit.exe.
+      - name: Fetch bundled tools
+        shell: pwsh
+        run: |
+          $release = "build-vcpkg\Release"
+          Invoke-WebRequest https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe -OutFile "$release\yt-dlp.exe"
+          Invoke-WebRequest https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg
+          Copy-Item (Get-ChildItem ffmpeg -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName "$release\ffmpeg.exe"
+          & "$release\yt-dlp.exe" --version
+          & "$release\ffmpeg.exe" -hide_banner -version | Select-Object -First 1
+
+      - name: Build the installer
+        id: installer
+        shell: pwsh
+        run: |
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc /Q installer\Orbit.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $setup = Get-ChildItem installer\Output\OrbitSetup-*.exe | Select-Object -First 1
+          $hash = (Get-FileHash $setup.FullName -Algorithm SHA256).Hash
+          "path=$($setup.FullName)" >> $env:GITHUB_OUTPUT
+          Write-Host ("{0}: {1:N0} bytes, SHA-256 {2}" -f $setup.Name, $setup.Length, $hash)
+
+      # Installs the real setup on a clean Windows, checks what it put in place, talks to the
+      # installed Orbit through the browser extension's native host, downloads a file with it
+      # and uninstalls again.
+      - name: Install, run and uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'Orbit'
+          $setup = Start-Process '${{ steps.installer.outputs.path }}' -Wait -PassThru -ArgumentList `
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$dir", "/LOG=$env:RUNNER_TEMP\setup.log"
+          if ($setup.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\setup.log" -Tail 40; throw "Setup exited with $($setup.ExitCode)" }
+
+          foreach ($f in 'orbit.exe', 'orbit-native-host.exe', 'Qt6Core.dll', 'Qt6Quick.dll', 'platforms\qwindows.dll',
+                         'torrent-rasterbar.dll', 'libcurl.dll', 'yt-dlp.exe', 'ffmpeg.exe', 'qt.conf', 'unins000.exe',
+                         'License.txt', 'PrivacyPolicy.txt') {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "missing after install: $f" }
+          }
+          foreach ($key in 'HKCU:\Software\Classes\orbit\shell\open\command', 'HKCU:\Software\Classes\Orbit.Torrent',
+                           'HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.orbit.downloadmanager') {
+            if (-not (Test-Path $key)) { throw "missing registry key: $key" }
+          }
+          Write-Host 'Installed files and registry keys are in place.'
+
+          # The native host starts Orbit when it isn't running yet.
+          $hostExe = Join-Path $dir 'orbit-native-host.exe'
+          $ping = python .github\scripts\native_message.py $hostExe '{"type":"ping"}' | ConvertFrom-Json
+          Write-Host "ping: $($ping | ConvertTo-Json -Compress)"
+          $expected = (Select-String -Path installer\Orbit.iss -Pattern '^#define AppVersion "([^"]+)"').Matches[0].Groups[1].Value
+          if (-not $ping.ok -or $ping.version -ne $expected) { throw "unexpected ping reply (wanted version $expected)" }
+
+          $url = 'https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/LICENSE'
+          $add = python .github\scripts\native_message.py $hostExe ('{"type":"add","url":"' + $url + '","filename":"orbit-ci-license.txt"}') | ConvertFrom-Json
+          if (-not $add.ok) { throw "add failed: $($add | ConvertTo-Json -Compress)" }
+          $file = Join-Path $env:USERPROFILE 'Downloads\orbit-ci-license.txt'
+          $deadline = (Get-Date).AddSeconds(60)
+          while (-not ((Test-Path $file) -and ((Get-Item $file).Length -eq (Get-Item LICENSE).Length)) -and (Get-Date) -lt $deadline) { Start-Sleep 1 }
+          if (-not (Test-Path $file)) { throw 'the download never arrived' }
+          if ((Get-FileHash $file).Hash -ne (Get-FileHash LICENSE).Hash) { throw 'the downloaded file differs from LICENSE' }
+          Write-Host 'Orbit downloaded a file through the native host.'
+          & (Join-Path $dir 'yt-dlp.exe') --version
+          Get-Content (Join-Path $env:APPDATA 'Orbit\orbit.log') -ErrorAction SilentlyContinue | Select-Object -Last 15
+
+          Get-Process orbit -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep 2
+          $uninstall = Start-Process (Join-Path $dir 'unins000.exe') -Wait -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Test-Path (Join-Path $dir 'orbit.exe')) -and (Get-Date) -lt $deadline) { Start-Sleep 1 }
+          if (Test-Path (Join-Path $dir 'orbit.exe')) { throw 'orbit.exe is still there after uninstalling' }
+          if (Test-Path 'HKCU:\Software\Classes\orbit') { throw 'the orbit:// registration survived the uninstall' }
+          Write-Host 'Uninstalled cleanly.'
+
+      - name: Upload the installer
         uses: actions/upload-artifact@v4
         with:
-          name: orbit-windows-x64
-          path: |
-            build-vcpkg/Release/
-            !build-vcpkg/Release/*.lib
-            !build-vcpkg/Release/*.pdb
-            !build-vcpkg/Release/*.exp
-          retention-days: 14
+          name: orbit-windows-installer
+          path: installer/Output/OrbitSetup-*.exe
+          retention-days: 30

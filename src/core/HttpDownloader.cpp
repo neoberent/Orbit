@@ -64,6 +64,17 @@ struct WriteContext {
     std::atomic<bool>* cancelled{nullptr};
     orbit::utils::SpeedLimiter* globalLimiter{nullptr};
     orbit::utils::SpeedLimiter* jobLimiter{nullptr};
+    // Stall detection: when data last arrived (or a speed cap last let this connection go
+    // on), and how long without data counts as a dead connection.
+    std::chrono::steady_clock::duration stallTimeout{};
+    std::chrono::steady_clock::time_point lastData{};
+    bool stalled{false};
+
+    // Called before each request.
+    void arm() {
+        lastData = std::chrono::steady_clock::now();
+        stalled = false;
+    }
 };
 
 size_t curlWriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
@@ -74,15 +85,30 @@ size_t curlWriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     ctx->counter->fetch_add(written, std::memory_order_relaxed);
     if (ctx->jobLimiter) ctx->jobLimiter->consume(written, ctx->paused, ctx->cancelled);
     if (ctx->globalLimiter) ctx->globalLimiter->consume(written, ctx->paused, ctx->cancelled);
+    // Stamped after the speed caps let go: time spent held back by a cap is never a stall.
+    ctx->lastData = std::chrono::steady_clock::now();
     return written;
 }
 
+// curl calls this at least once a second, even while no data is arriving.
 int curlProgressCallback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
     auto* ctx = static_cast<WriteContext*>(clientp);
     if (ctx->paused->load(std::memory_order_relaxed) || ctx->cancelled->load(std::memory_order_relaxed)) {
         return 1;
     }
+    // A server that keeps the connection open but stops sending (or never starts) would
+    // otherwise hold this segment forever.
+    if (ctx->stallTimeout.count() > 0 && std::chrono::steady_clock::now() - ctx->lastData > ctx->stallTimeout) {
+        ctx->stalled = true;
+        return 1;
+    }
     return 0;
+}
+
+// A request this downloader aborted because it stalled is retried like a dropped
+// connection; any other abort is a pause or cancel.
+CURLcode stallAsTimeout(CURLcode res, const WriteContext& ctx) {
+    return res == CURLE_ABORTED_BY_CALLBACK && ctx.stalled ? CURLE_OPERATION_TIMEDOUT : res;
 }
 
 // Lets a probe give up as soon as any of its flags is set: the downloader shutting down,
@@ -876,11 +902,6 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
-    // A server that keeps the connection open but stops sending would otherwise hold this
-    // segment forever. Below 1 byte/s for the stall timeout, curl gives up with
-    // CURLE_OPERATION_TIMEDOUT, which is retried like any dropped connection.
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, stallTimeoutSeconds_.load());
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curlProgressCallback);
 
@@ -932,11 +953,13 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
 #else
         std::fseek(fp, static_cast<long>(resumeOffset), SEEK_SET);
 #endif
-        WriteContext ctx{fp, &segment.bytesDownloaded, &job.paused, &job.cancelStart, &globalLimiter_, &job.limiter};
+        WriteContext ctx{fp, &segment.bytesDownloaded, &job.paused, &job.cancelStart, &globalLimiter_, &job.limiter,
+                         std::chrono::seconds(stallTimeoutSeconds_.load())};
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
         curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
         while (true) {
-            res = curl_easy_perform(curl);
+            ctx.arm();
+            res = stallAsTimeout(curl_easy_perform(curl), ctx);
             if (res == CURLE_OK || res == CURLE_ABORTED_BY_CALLBACK) break;
             if (!shouldRetry(res)) break;
             segment.bytesDownloaded = 0;
@@ -966,14 +989,16 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
 #else
             std::fseek(fp, static_cast<long>(resumeOffset), SEEK_SET);
 #endif
-            WriteContext ctx{fp, &segment.bytesDownloaded, &job.paused, &job.cancelStart, &globalLimiter_, &job.limiter};
+            WriteContext ctx{fp, &segment.bytesDownloaded, &job.paused, &job.cancelStart, &globalLimiter_, &job.limiter,
+                         std::chrono::seconds(stallTimeoutSeconds_.load())};
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
             curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
 
             const std::string rangeHeader = std::to_string(resumeOffset) + "-" + std::to_string(chunkEnd);
             curl_easy_setopt(curl, CURLOPT_RANGE, rangeHeader.c_str());
 
-            res = curl_easy_perform(curl);
+            ctx.arm();
+            res = stallAsTimeout(curl_easy_perform(curl), ctx);
             if (res != CURLE_OK) {
                 if (res == CURLE_ABORTED_BY_CALLBACK) break;
                 if (shouldRetry(res)) continue;
