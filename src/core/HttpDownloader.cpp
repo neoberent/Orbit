@@ -85,6 +85,11 @@ int curlProgressCallback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl
     return 0;
 }
 
+// Lets a probe give up as soon as the downloader starts shutting down.
+int abortOnFlagCallback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    return static_cast<const std::atomic<bool>*>(clientp)->load(std::memory_order_relaxed) ? 1 : 0;
+}
+
 struct ProbeContext {
     bool supportsRanges{false};
     std::string contentDispositionFilename;
@@ -185,19 +190,36 @@ HttpDownloader::HttpDownloader(ProgressReporter reporter) : reporter_(std::move(
 }
 
 HttpDownloader::~HttpDownloader() {
-    std::vector<Job*> jobs;
+    shuttingDown_ = true;
     {
         std::scoped_lock lock(jobsMutex_);
-        for (auto& [id, job] : jobs_) {
-            job->paused = true;
-            jobs.push_back(job.get());
-        }
+        for (auto& [id, job] : jobs_) job->paused = true;
     }
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    for (Job* job : jobs) {
-        while (job->running.load() && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
+    // Every blocking step a supervisor takes (the probe, segment transfers, retry
+    // back-off) gives up within a moment of `paused`/`shuttingDown_`, so this wait is
+    // short; ending it early would free jobs that live threads are still using.
+    std::unique_lock lock(supervisorsMutex_);
+    supervisorsDone_.wait(lock, [this] { return liveSupervisors_ == 0; });
+}
+
+void HttpDownloader::launchSupervisor(DownloadId id) {
+    {
+        std::scoped_lock lock(supervisorsMutex_);
+        ++liveSupervisors_;
+    }
+    try {
+        std::thread([this, id] {
+            runSupervisor(id);
+            // Notified under the lock: once it's released this thread touches nothing of
+            // `this`, so the destructor may go ahead and free it.
+            std::scoped_lock lock(supervisorsMutex_);
+            --liveSupervisors_;
+            supervisorsDone_.notify_all();
+        }).detach();
+    } catch (...) {
+        std::scoped_lock lock(supervisorsMutex_);
+        --liveSupervisors_;
+        throw;
     }
 }
 
@@ -220,9 +242,11 @@ void HttpDownloader::start(DownloadId id, const DownloadRequest& request) {
         if (!partialFile.empty() && std::filesystem::exists(partialFile)) {
             job->request.existingFilePath = partialFile.string();
         }
+        if (shuttingDown_.load()) return;
+        job->running = true;
         jobs_.emplace(id, std::move(job));
     }
-    std::thread(&HttpDownloader::runSupervisor, this, id).detach();
+    launchSupervisor(id);
 }
 
 void HttpDownloader::pause(DownloadId id) {
@@ -233,17 +257,17 @@ void HttpDownloader::pause(DownloadId id) {
 }
 
 void HttpDownloader::resume(DownloadId id) {
-    Job* jobPtr = nullptr;
     {
         std::scoped_lock lock(jobsMutex_);
         auto it = jobs_.find(id);
-        if (it == jobs_.end()) return;
-        jobPtr = it->second.get();
+        if (it == jobs_.end() || shuttingDown_.load()) return;
+        Job& job = *it->second;
+        // Claimed under the lock, so two quick resumes can't start two supervisors.
+        if (job.running.exchange(true)) return;
+        job.paused = false;
+        job.cancelStart = false;
     }
-    if (jobPtr->running.load()) return;
-    jobPtr->paused = false;
-    jobPtr->cancelStart = false;
-    std::thread(&HttpDownloader::runSupervisor, this, id).detach();
+    launchSupervisor(id);
 }
 
 void HttpDownloader::cancel(DownloadId id) {
@@ -418,6 +442,9 @@ RemoteProbe HttpDownloader::probe(const DownloadRequest& request) const {
             curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
             curl_easy_setopt(curl, CURLOPT_RANGE, "0-0");
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, discardWriteCallback);
+            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+            curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abortOnFlagCallback);
+            curl_easy_setopt(curl, CURLOPT_XFERINFODATA, const_cast<std::atomic<bool>*>(&shuttingDown_));
             long httpCode = 0;
             if (curl_easy_perform(curl) == CURLE_OK) {
                 curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
@@ -485,6 +512,9 @@ bool HttpDownloader::probeRemote(const DownloadRequest& request, std::uint64_t& 
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abortOnFlagCallback);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, const_cast<std::atomic<bool>*>(&shuttingDown_));
 
     CURLcode res = curl_easy_perform(curl);
     long httpCode = 0;
@@ -542,6 +572,26 @@ void HttpDownloader::runSupervisor(DownloadId id) {
     Job& job = *jobPtr;
     job.running = true;
 
+    // A paused job resumes from the segments it still holds in memory, which skips the
+    // size check a restart makes against the sidecar below. Make it here too: if the file
+    // on the server changed size, finishing the old segments would splice two files.
+    if (!job.segments.empty() && job.totalBytes > 0) {
+        reporter_.reportStateChanged(id, DownloadState::Connecting);
+        std::uint64_t remoteSize = 0;
+        bool supportsRanges = false;
+        std::string fileName;
+        std::string probeError;
+        if (probeRemote(job.request, remoteSize, supportsRanges, fileName, probeError) && remoteSize > 0 &&
+            remoteSize != job.totalBytes) {
+            ORBIT_LOG_WARN("HttpDownloader", "Size on the server changed (" + std::to_string(job.totalBytes) + " -> " +
+                                                 std::to_string(remoteSize) + "); restarting " + job.filePath.string());
+            job.segments.clear();
+            std::error_code ec;
+            std::filesystem::remove(job.metaPath, ec);
+            job.request.existingFilePath = job.filePath.string();
+        }
+    }
+
     if (job.segments.empty()) {
         reporter_.reportStateChanged(id, DownloadState::Connecting);
 
@@ -553,6 +603,19 @@ void HttpDownloader::runSupervisor(DownloadId id) {
 
         if (!probeOk) {
             ORBIT_LOG_WARN("HttpDownloader", "Probe failed for " + job.request.source + ": " + probeError);
+        }
+
+        // Paused, cancelled or shut down while the server was being asked: stop before any
+        // file is created, so a later resume simply asks again.
+        if (job.cancelStart.load()) {
+            job.running = false;
+            reporter_.reportStateChanged(id, DownloadState::Cancelled);
+            return;
+        }
+        if (job.paused.load()) {
+            job.running = false;
+            reporter_.reportStateChanged(id, DownloadState::Paused);
+            return;
         }
 
         utils::ensureDirectoryExists(job.request.destinationDir);

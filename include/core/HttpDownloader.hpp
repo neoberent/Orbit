@@ -4,6 +4,7 @@
 #include "utils/SpeedLimiter.hpp"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <filesystem>
 #include <memory>
@@ -118,6 +119,10 @@ private:
     // policy. Returns an empty path when the user has to be asked first.
     [[nodiscard]] std::filesystem::path resolveTargetPath(const Job& job, const std::filesystem::path& desired) const;
 
+    // Runs runSupervisor(id) on a detached thread that the destructor still waits for.
+    // The caller must already have set the job's `running` flag, so neither a second
+    // resume() nor forget()/start() can touch the job before the supervisor picks it up.
+    void launchSupervisor(DownloadId id);
     void runSupervisor(DownloadId id);
     void downloadSegment(Job& job, Segment& segment, int segmentIndex);
     // Called from the supervisor's poll loop only, so it's the sole writer of
@@ -141,6 +146,16 @@ private:
     orbit::utils::SpeedLimiter globalLimiter_;
     mutable std::mutex proxyMutex_;
     ProxySettings proxy_;
+
+    // Supervisor threads are detached (a state-change listener may erase their Job from
+    // inside the supervisor's own callback, so nobody can own and join them), but every
+    // one is counted here, and the destructor waits for the count to reach zero before
+    // the jobs they point at are freed.
+    std::mutex supervisorsMutex_;
+    std::condition_variable supervisorsDone_;
+    int liveSupervisors_{0};
+    // Set by the destructor: aborts in-flight probes and refuses new supervisors.
+    std::atomic<bool> shuttingDown_{false};
 };
 
 }
