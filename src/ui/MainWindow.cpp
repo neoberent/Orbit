@@ -23,6 +23,7 @@
 #include <QPointer>
 #include <QProcess>
 #include <QSaveFile>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
 
@@ -154,6 +155,7 @@ MainWindow::MainWindow(orbit::core::DownloadManager& manager, bool portable, QOb
 
     remoteAccessEnabled_ = settings.value("remote/enabled", false).toBool();
     remotePort_ = settings.value("remote/port", 8765).toInt();
+    setRemoteTunnelHost(settings.value("remote/tunnelHost").toString());
     const QString remoteUser = settings.value("remote/username").toString();
     const QString remoteHash = settings.value("remote/passwordHash").toString();
     const QString remoteSalt = settings.value("remote/passwordSalt").toString();
@@ -489,6 +491,21 @@ void MainWindow::setRemotePort(int port) {
     QSettings().setValue("remote/port", port);
     emit remotePortChanged();
     if (remoteAccessEnabled_) applyRemoteServerState();
+}
+
+void MainWindow::setRemoteTunnelHost(const QString& hosts) {
+    // Accepts "orbit.example.com", "https://orbit.example.com/" or several, comma separated.
+    QStringList names;
+    for (const QString& part : hosts.split(QRegularExpression(QStringLiteral("[,\\s]+")), Qt::SkipEmptyParts)) {
+        const QString host = orbit::core::RemoteServer::normalizeHost(part);
+        if (!host.isEmpty() && !names.contains(host)) names.append(host);
+    }
+    remoteServer_->setAllowedHosts(names);
+    const QString joined = names.join(QStringLiteral(", "));
+    if (joined == remoteTunnelHost_) return;
+    remoteTunnelHost_ = joined;
+    QSettings().setValue("remote/tunnelHost", joined);
+    emit remoteTunnelHostChanged();
 }
 
 QString MainWindow::remoteUsername() const { return remoteServer_->username(); }

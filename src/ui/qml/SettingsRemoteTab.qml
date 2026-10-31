@@ -18,6 +18,7 @@ ColumnLayout {
         remotePasswordConfirmField.text = ""
         remoteCredError.text = ""
         portField.text = appController.remotePort
+        tunnelHostField.text = appController.remoteTunnelHost
     }
 
     SettingsGroup {
@@ -171,6 +172,17 @@ ColumnLayout {
             CopyableCommand { command: "cloudflared tunnel run orbit" }
             StepText { text: "5. Optional: keep it running after a reboot" }
             CopyableCommand { command: "cloudflared service install" }
+            StepText { text: "6. Enter the hostname here, so Orbit answers requests for it" }
+            FormField {
+                id: tunnelHostField
+                Layout.preferredWidth: 280
+                monospace: true
+                placeholderText: "orbit.yourdomain.com"
+                onEditingFinished: {
+                    appController.remoteTunnelHost = text
+                    text = appController.remoteTunnelHost
+                }
+            }
             StepText { text: "Then visit https://orbit.yourdomain.com from anywhere."; color: Theme.textTertiary }
         }
     }

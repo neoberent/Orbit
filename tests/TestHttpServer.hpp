@@ -29,6 +29,10 @@ public:
         bool hang{false};
         // Answers every request with this status and no body (0 = serve normally).
         int status{0};
+        // The first `stallGets` GET requests send `stallAfterBytes` of their body and then go
+        // silent with the connection left open, like a server that died mid-transfer.
+        int stallGets{0};
+        int stallAfterBytes{0};
         // Sent as Content-Disposition when set.
         QString fileName;
     };

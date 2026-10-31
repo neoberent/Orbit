@@ -252,6 +252,80 @@ private slots:
         QCOMPARE(readFile(rec.path(1)), second);
     }
 
+    // A server that stops sending mid-transfer but keeps the connection open must not hang
+    // the download forever: the stalled request is dropped and retried.
+    void stalledConnectionIsRetried_data() {
+        QTest::addColumn<bool>("ranges");
+        QTest::newRow("ranged") << true;
+        QTest::newRow("no ranges") << false;
+    }
+
+    void stalledConnectionIsRetried() {
+        QFETCH(bool, ranges);
+        const QByteArray payload = randomPayload(512 * 1024 + 11);
+        server_->setBehaviour({.payload = payload, .ranges = ranges, .stallGets = 1, .stallAfterBytes = 100 * 1024});
+        QTemporaryDir dir;
+        Recorder rec;
+        HttpDownloader dl(rec.reporter());
+        dl.setStallTimeout(2s);
+        dl.start(1, request(dir, "file.bin", 1));
+        QVERIFY2(rec.waitForState(1, DownloadState::Completed, 20s), rec.error(1).c_str());
+        QCOMPARE(readFile(rec.path(1)), payload);
+        QVERIFY(server_->getRequests() >= 2);
+    }
+
+    // The stall check must not mistake a download held back by a speed cap for a dead one.
+    void speedCapIsNotMistakenForAStall() {
+        const QByteArray payload = randomPayload(96 * 1024);
+        server_->setBehaviour({.payload = payload});
+        QTemporaryDir dir;
+        Recorder rec;
+        HttpDownloader dl(rec.reporter());
+        dl.setStallTimeout(1s);
+        dl.setGlobalSpeedLimit(16 * 1024);
+        dl.start(1, request(dir, "file.bin", 4));
+        QVERIFY2(rec.waitForState(1, DownloadState::Completed, 30s), rec.error(1).c_str());
+        QCOMPARE(readFile(rec.path(1)), payload);
+        QCOMPARE(rec.count(1, DownloadState::Error), 0);
+        const int gets = server_->getRequests();
+        QVERIFY2(gets <= 4, qPrintable(QStringLiteral("%1 GETs: a capped segment was retried").arg(gets)));
+    }
+
+    // Pausing or cancelling while the server never answers the probe used to wait for
+    // curl's 30 s timeout.
+    void pauseDuringAHangingProbeIsQuick() {
+        server_->setBehaviour({.payload = randomPayload(1000), .hang = true});
+        QTemporaryDir dir;
+        Recorder rec;
+        HttpDownloader dl(rec.reporter());
+        dl.start(1, request(dir));
+        QVERIFY(rec.waitForState(1, DownloadState::Connecting));
+        std::this_thread::sleep_for(200ms);
+        const auto start = std::chrono::steady_clock::now();
+        dl.pause(1);
+        QVERIFY(rec.waitForState(1, DownloadState::Paused, 5s));
+        QVERIFY(std::chrono::steady_clock::now() - start < 3s);
+        QVERIFY(!fs::exists(fs::path(dir.path().toStdString()) / "file.bin"));
+
+        server_->setBehaviour({.payload = randomPayload(1000)});
+        dl.resume(1);
+        QVERIFY2(rec.waitForState(1, DownloadState::Completed), rec.error(1).c_str());
+    }
+
+    void cancelDuringAHangingProbeIsQuick() {
+        server_->setBehaviour({.payload = randomPayload(1000), .hang = true});
+        QTemporaryDir dir;
+        Recorder rec;
+        HttpDownloader dl(rec.reporter());
+        dl.start(1, request(dir));
+        QVERIFY(rec.waitForState(1, DownloadState::Connecting));
+        std::this_thread::sleep_for(200ms);
+        const auto start = std::chrono::steady_clock::now();
+        dl.cancel(1);
+        QVERIFY(rec.waitForState(1, DownloadState::Cancelled, 5s));
+        QVERIFY(std::chrono::steady_clock::now() - start < 3s);
+    }
+
     void probeReportsSizeRangesAndName() {
         server_->setBehaviour({.payload = randomPayload(12345), .fileName = QStringLiteral("report final.pdf")});
         Recorder rec;

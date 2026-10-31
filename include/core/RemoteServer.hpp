@@ -6,6 +6,7 @@
 #include <QList>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 
 #include <utility>
 
@@ -45,6 +46,16 @@ public:
     [[nodiscard]] QString passwordHashBase64() const;
     [[nodiscard]] QString passwordSaltBase64() const;
     [[nodiscard]] int passwordIterations() const { return iterations_; }
+
+    // Requests are only answered when their Host header names this PC (localhost,
+    // 127.0.0.1, [::1]), a Cloudflare quick tunnel (*.trycloudflare.com) or one of these
+    // extra host names, e.g. a named tunnel's "orbit.example.com". That stops a web page
+    // from reaching the dashboard by pointing its own domain at 127.0.0.1 (DNS rebinding).
+    void setAllowedHosts(const QStringList& hosts);
+    [[nodiscard]] QStringList allowedHosts() const { return allowedHosts_; }
+    // The bare, lower-case host name in a Host header, URL or plain name ("" if none).
+    [[nodiscard]] static QString normalizeHost(const QString& hostOrUrl);
+    [[nodiscard]] bool isAllowedHost(const QString& hostHeader) const;
 
 signals:
     void errorOccurred(const QString& message);
@@ -99,6 +110,8 @@ private:
     QTcpServer* server_{nullptr};
     quint16 port_{8765};
     QString lastError_;
+
+    QStringList allowedHosts_;
 
     QString username_;
     QByteArray passwordHash_;

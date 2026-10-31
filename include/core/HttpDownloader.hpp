@@ -50,6 +50,10 @@ public:
 
     void setProxy(const ProxySettings& proxy);
 
+    // A connection that delivers no data for this long is treated as dropped and
+    // retried, instead of waiting on a silent server forever. Default 60 s.
+    void setStallTimeout(std::chrono::seconds timeout);
+
     // Asks the server about a link (size, range support, file name) without downloading
     // it, using the request's cookies, referrer and user agent. Blocks for up to ~50 s.
     [[nodiscard]] RemoteProbe probe(const DownloadRequest& request) const;
@@ -130,9 +134,11 @@ private:
     // writer of a donor segment's endOffset.
     void rebalanceSegments(Job& job);
 
+    // `job`, when given, lets the probe give up as soon as that job is paused or cancelled
+    // (it always gives up on shutdown).
     bool probeRemote(const DownloadRequest& request, std::uint64_t& outSize,
                      bool& outSupportsRanges, std::string& outFileName,
-                     std::string& outError) const;
+                     std::string& outError, const Job* job = nullptr) const;
     void applyRequestOptions(void* curl, const DownloadRequest& request) const;
 
     void saveResumeMetadata(Job& job) const;
@@ -156,6 +162,7 @@ private:
     int liveSupervisors_{0};
     // Set by the destructor: aborts in-flight probes and refuses new supervisors.
     std::atomic<bool> shuttingDown_{false};
+    std::atomic<long> stallTimeoutSeconds_{60};
 };
 
 }
