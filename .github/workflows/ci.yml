@@ -16,7 +16,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed \
             base-devel cmake ninja pkgconf git \
-            qt6-base qt6-declarative libtorrent-rasterbar curl openssl libxcb
+            qt6-base qt6-declarative libtorrent-rasterbar boost curl openssl libxcb
 
       - uses: actions/checkout@v4
 
