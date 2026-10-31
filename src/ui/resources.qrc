@@ -30,6 +30,17 @@
         <file alias="FormField.qml">qml/FormField.qml</file>
         <file alias="SettingsGroup.qml">qml/SettingsGroup.qml</file>
         <file alias="SettingsRow.qml">qml/SettingsRow.qml</file>
+        <file alias="ValueChip.qml">qml/ValueChip.qml</file>
+        <file alias="StepText.qml">qml/StepText.qml</file>
+        <file alias="SettingsGeneralTab.qml">qml/SettingsGeneralTab.qml</file>
+        <file alias="SettingsDownloadsTab.qml">qml/SettingsDownloadsTab.qml</file>
+        <file alias="SettingsNetworkTab.qml">qml/SettingsNetworkTab.qml</file>
+        <file alias="SettingsTorrentTab.qml">qml/SettingsTorrentTab.qml</file>
+        <file alias="SettingsMediaTab.qml">qml/SettingsMediaTab.qml</file>
+        <file alias="SettingsBrowserTab.qml">qml/SettingsBrowserTab.qml</file>
+        <file alias="SettingsScheduleTab.qml">qml/SettingsScheduleTab.qml</file>
+        <file alias="SettingsRemoteTab.qml">qml/SettingsRemoteTab.qml</file>
+        <file alias="SettingsAboutTab.qml">qml/SettingsAboutTab.qml</file>
         <file alias="KeyCap.qml">qml/KeyCap.qml</file>
         <file alias="Prefs.qml">qml/Prefs.qml</file>
         <file alias="SpeedGraph.qml">qml/SpeedGraph.qml</file>

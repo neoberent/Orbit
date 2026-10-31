@@ -1,6 +1,7 @@
 build/
 build-vcpkg/
 build-linux/
+build-tests/
 *.obj
 *.pdb
 *.ilk

@@ -1,4 +1,4 @@
-#define AppVersion "3.1.2"
+#define AppVersion "3.1.3"
 
 [Setup]
 AppId={{287650A1-6323-4DC5-8A2E-F1327D88CA43}
@@ -189,8 +189,10 @@ begin
     DataDir := ExpandConstant('{userappdata}\Orbit');
     if DirExists(DataDir) then
     begin
-      if MsgBox('Also delete your Orbit settings, logs, and download history stored in ' + DataDir + '?',
-                mbConfirmation, MB_YESNO) = IDYES then
+      // SuppressibleMsgBox, so a silent uninstall (/SUPPRESSMSGBOXES) doesn't wait on an
+      // invisible question; it then keeps the user's data.
+      if SuppressibleMsgBox('Also delete your Orbit settings, logs, and download history stored in ' + DataDir + '?',
+                            mbConfirmation, MB_YESNO, IDNO) = IDYES then
         DelTree(DataDir, True, True, True);
     end;
   end;

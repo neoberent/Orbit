@@ -1,7 +1,16 @@
 cmake_minimum_required(VERSION 3.21)
 
+# installer/Orbit.iss is the one place the release version is set; the project, the
+# executables' version resources and ORBIT_VERSION all follow it.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/installer/Orbit.iss" ORBIT_ISS_VERSION_LINE REGEX "^#define AppVersion ")
+string(REGEX REPLACE "^#define AppVersion \"([^\"]+)\".*$" "\\1" ORBIT_RELEASE_VERSION "${ORBIT_ISS_VERSION_LINE}")
+if(NOT ORBIT_RELEASE_VERSION MATCHES "^[0-9]+(\\.[0-9]+)*$")
+    message(FATAL_ERROR "Couldn't read AppVersion from installer/Orbit.iss")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/installer/Orbit.iss")
+
 project(Orbit
-    VERSION 2.0.1
+    VERSION ${ORBIT_RELEASE_VERSION}
     DESCRIPTION "Orbit Download Manager - multi-connection HTTP and BitTorrent downloads"
     LANGUAGES CXX
 )
@@ -12,6 +21,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+endif()
+
+option(ORBIT_BUILD_TESTS "Build the test suite (run it with ctest)" OFF)
+option(ORBIT_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer (GCC/Clang)" OFF)
+if(ORBIT_SANITIZE AND NOT MSVC)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
 endif()
 
 set(CMAKE_AUTOMOC ON)
@@ -33,13 +49,8 @@ endif()
 
 qt_standard_project_setup()
 
-file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/installer/Orbit.iss" ORBIT_ISS_VERSION_LINE REGEX "^#define AppVersion ")
-string(REGEX REPLACE "^#define AppVersion \"([^\"]+)\".*$" "\\1" ORBIT_RELEASE_VERSION "${ORBIT_ISS_VERSION_LINE}")
-if(NOT ORBIT_RELEASE_VERSION MATCHES "^[0-9]+(\\.[0-9]+)*$")
-    message(FATAL_ERROR "Couldn't read AppVersion from installer/Orbit.iss")
-endif()
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/installer/Orbit.iss")
 message(STATUS "Orbit release version: ${ORBIT_RELEASE_VERSION}")
+
 
 # Version resources for the Windows executables (shown in file properties, and part of
 # what Windows and antivirus software use to identify the publisher's files).
@@ -61,6 +72,9 @@ endfunction()
 orbit_version_resource(orbit "Orbit Download Manager" ORBIT_APP_VERSION_RC)
 orbit_version_resource(orbit-native-host "Orbit browser extension connector" ORBIT_HOST_VERSION_RC)
 
+# The download engine: HTTP (libcurl), BitTorrent (libtorrent) and media (yt-dlp, run
+# through QProcess - the only reason it needs Qt Core). No GUI and no Qt Network, so it can
+# back a CLI, a headless service or the test suite as easily as the app.
 add_library(orbit_core STATIC
     src/core/Types.cpp
     src/core/DownloadTask.cpp
@@ -69,14 +83,7 @@ add_library(orbit_core STATIC
     include/core/MediaDownloader.hpp
     src/core/TorrentEngine.cpp
     src/core/DownloadManager.cpp
-    src/core/ProtocolHandler.cpp
-    src/core/SingleInstanceGuard.cpp
-    include/core/SingleInstanceGuard.hpp
-    src/core/RemoteServer.cpp
-    include/core/RemoteServer.hpp
-    src/core/Scheduler.cpp
-    include/core/Scheduler.hpp
-    src/web/webassets.qrc
+    src/core/DownloadManagerPersistence.cpp
     src/utils/Logger.cpp
     src/utils/FileUtils.cpp
     src/utils/StringUtils.cpp
@@ -97,18 +104,38 @@ target_link_libraries(orbit_core PUBLIC
     LibtorrentRasterbar::torrent-rasterbar
     Threads::Threads
     Qt6::Core
-    Qt6::Network
 )
 
 target_compile_definitions(orbit_core PUBLIC
     $<$<PLATFORM_ID:Windows>:NOMINMAX;WIN32_LEAN_AND_MEAN;_CRT_SECURE_NO_WARNINGS>
 )
 
-if(MSVC)
-    target_compile_options(orbit_core PRIVATE /W4 /permissive-)
-else()
-    target_compile_options(orbit_core PRIVATE -Wall -Wextra)
-endif()
+# App services around the engine: the web remote (with its bundled web UI), the
+# single-instance guard, the orbit:// protocol handler and the scheduler.
+add_library(orbit_services STATIC
+    src/core/ProtocolHandler.cpp
+    src/core/SingleInstanceGuard.cpp
+    include/core/SingleInstanceGuard.hpp
+    src/core/RemoteServer.cpp
+    include/core/RemoteServer.hpp
+    src/core/Scheduler.cpp
+    include/core/Scheduler.hpp
+    include/utils/LocalSocket.hpp
+    src/web/webassets.qrc
+)
+
+target_link_libraries(orbit_services PUBLIC
+    orbit_core
+    Qt6::Network
+)
+
+foreach(_orbit_lib orbit_core orbit_services)
+    if(MSVC)
+        target_compile_options(${_orbit_lib} PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(${_orbit_lib} PRIVATE -Wall -Wextra)
+    endif()
+endforeach()
 
 qt_add_executable(orbit
     src/ui/main.cpp
@@ -149,7 +176,7 @@ target_include_directories(orbit PRIVATE
 )
 
 target_link_libraries(orbit PRIVATE
-    orbit_core
+    orbit_services
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
@@ -248,4 +275,9 @@ if(WIN32)
             )
         endif()
     endif()
+endif()
+
+if(ORBIT_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
 endif()

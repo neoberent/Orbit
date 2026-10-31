@@ -64,6 +64,17 @@ struct WriteContext {
     std::atomic<bool>* cancelled{nullptr};
     orbit::utils::SpeedLimiter* globalLimiter{nullptr};
     orbit::utils::SpeedLimiter* jobLimiter{nullptr};
+    // Stall detection: when data last arrived (or a speed cap last let this connection go
+    // on), and how long without data counts as a dead connection.
+    std::chrono::steady_clock::duration stallTimeout{};
+    std::chrono::steady_clock::time_point lastData{};
+    bool stalled{false};
+
+    // Called before each request.
+    void arm() {
+        lastData = std::chrono::steady_clock::now();
+        stalled = false;
+    }
 };
 
 size_t curlWriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
@@ -74,13 +85,41 @@ size_t curlWriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     ctx->counter->fetch_add(written, std::memory_order_relaxed);
     if (ctx->jobLimiter) ctx->jobLimiter->consume(written, ctx->paused, ctx->cancelled);
     if (ctx->globalLimiter) ctx->globalLimiter->consume(written, ctx->paused, ctx->cancelled);
+    // Stamped after the speed caps let go: time spent held back by a cap is never a stall.
+    ctx->lastData = std::chrono::steady_clock::now();
     return written;
 }
 
+// curl calls this at least once a second, even while no data is arriving.
 int curlProgressCallback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
     auto* ctx = static_cast<WriteContext*>(clientp);
     if (ctx->paused->load(std::memory_order_relaxed) || ctx->cancelled->load(std::memory_order_relaxed)) {
         return 1;
+    }
+    // A server that keeps the connection open but stops sending (or never starts) would
+    // otherwise hold this segment forever.
+    if (ctx->stallTimeout.count() > 0 && std::chrono::steady_clock::now() - ctx->lastData > ctx->stallTimeout) {
+        ctx->stalled = true;
+        return 1;
+    }
+    return 0;
+}
+
+// A request this downloader aborted because it stalled is retried like a dropped
+// connection; any other abort is a pause or cancel.
+CURLcode stallAsTimeout(CURLcode res, const WriteContext& ctx) {
+    return res == CURLE_ABORTED_BY_CALLBACK && ctx.stalled ? CURLE_OPERATION_TIMEDOUT : res;
+}
+
+// Lets a probe give up as soon as any of its flags is set: the downloader shutting down,
+// or the job it probes for being paused or cancelled. Unused flags are null.
+struct AbortFlags {
+    const std::atomic<bool>* flags[3]{};
+};
+
+int abortOnFlagCallback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    for (const std::atomic<bool>* flag : static_cast<const AbortFlags*>(clientp)->flags) {
+        if (flag && flag->load(std::memory_order_relaxed)) return 1;
     }
     return 0;
 }
@@ -185,19 +224,36 @@ HttpDownloader::HttpDownloader(ProgressReporter reporter) : reporter_(std::move(
 }
 
 HttpDownloader::~HttpDownloader() {
-    std::vector<Job*> jobs;
+    shuttingDown_ = true;
     {
         std::scoped_lock lock(jobsMutex_);
-        for (auto& [id, job] : jobs_) {
-            job->paused = true;
-            jobs.push_back(job.get());
-        }
+        for (auto& [id, job] : jobs_) job->paused = true;
     }
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    for (Job* job : jobs) {
-        while (job->running.load() && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
+    // Every blocking step a supervisor takes (the probe, segment transfers, retry
+    // back-off) gives up within a moment of `paused`/`shuttingDown_`, so this wait is
+    // short; ending it early would free jobs that live threads are still using.
+    std::unique_lock lock(supervisorsMutex_);
+    supervisorsDone_.wait(lock, [this] { return liveSupervisors_ == 0; });
+}
+
+void HttpDownloader::launchSupervisor(DownloadId id) {
+    {
+        std::scoped_lock lock(supervisorsMutex_);
+        ++liveSupervisors_;
+    }
+    try {
+        std::thread([this, id] {
+            runSupervisor(id);
+            // Notified under the lock: once it's released this thread touches nothing of
+            // `this`, so the destructor may go ahead and free it.
+            std::scoped_lock lock(supervisorsMutex_);
+            --liveSupervisors_;
+            supervisorsDone_.notify_all();
+        }).detach();
+    } catch (...) {
+        std::scoped_lock lock(supervisorsMutex_);
+        --liveSupervisors_;
+        throw;
     }
 }
 
@@ -220,9 +276,11 @@ void HttpDownloader::start(DownloadId id, const DownloadRequest& request) {
         if (!partialFile.empty() && std::filesystem::exists(partialFile)) {
             job->request.existingFilePath = partialFile.string();
         }
+        if (shuttingDown_.load()) return;
+        job->running = true;
         jobs_.emplace(id, std::move(job));
     }
-    std::thread(&HttpDownloader::runSupervisor, this, id).detach();
+    launchSupervisor(id);
 }
 
 void HttpDownloader::pause(DownloadId id) {
@@ -233,17 +291,17 @@ void HttpDownloader::pause(DownloadId id) {
 }
 
 void HttpDownloader::resume(DownloadId id) {
-    Job* jobPtr = nullptr;
     {
         std::scoped_lock lock(jobsMutex_);
         auto it = jobs_.find(id);
-        if (it == jobs_.end()) return;
-        jobPtr = it->second.get();
+        if (it == jobs_.end() || shuttingDown_.load()) return;
+        Job& job = *it->second;
+        // Claimed under the lock, so two quick resumes can't start two supervisors.
+        if (job.running.exchange(true)) return;
+        job.paused = false;
+        job.cancelStart = false;
     }
-    if (jobPtr->running.load()) return;
-    jobPtr->paused = false;
-    jobPtr->cancelStart = false;
-    std::thread(&HttpDownloader::runSupervisor, this, id).detach();
+    launchSupervisor(id);
 }
 
 void HttpDownloader::cancel(DownloadId id) {
@@ -323,6 +381,10 @@ void HttpDownloader::relocate(DownloadId id, const std::filesystem::path& newFil
 void HttpDownloader::setProxy(const ProxySettings& proxy) {
     std::scoped_lock lock(proxyMutex_);
     proxy_ = proxy;
+}
+
+void HttpDownloader::setStallTimeout(std::chrono::seconds timeout) {
+    stallTimeoutSeconds_ = std::max<long>(1, static_cast<long>(timeout.count()));
 }
 
 std::string HttpDownloader::netscapeCookieLine(const HttpCookie& cookie) { return netscapeLine(cookie); }
@@ -418,6 +480,10 @@ RemoteProbe HttpDownloader::probe(const DownloadRequest& request) const {
             curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
             curl_easy_setopt(curl, CURLOPT_RANGE, "0-0");
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, discardWriteCallback);
+            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+            AbortFlags abort{{&shuttingDown_}};
+            curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abortOnFlagCallback);
+            curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &abort);
             long httpCode = 0;
             if (curl_easy_perform(curl) == CURLE_OK) {
                 curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
@@ -464,7 +530,7 @@ bool HttpDownloader::rewriteResumeSource(const std::filesystem::path& metaPath, 
 
 bool HttpDownloader::probeRemote(const DownloadRequest& request, std::uint64_t& outSize,
                                  bool& outSupportsRanges, std::string& outFileName,
-                                 std::string& outError) const {
+                                 std::string& outError, const Job* job) const {
     const std::string& url = request.source;
     CURL* curl = curl_easy_init();
     if (!curl) {
@@ -485,6 +551,10 @@ bool HttpDownloader::probeRemote(const DownloadRequest& request, std::uint64_t& 
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    AbortFlags abort{{&shuttingDown_, job ? &job->paused : nullptr, job ? &job->cancelStart : nullptr}};
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abortOnFlagCallback);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &abort);
 
     CURLcode res = curl_easy_perform(curl);
     long httpCode = 0;
@@ -542,6 +612,26 @@ void HttpDownloader::runSupervisor(DownloadId id) {
     Job& job = *jobPtr;
     job.running = true;
 
+    // A paused job resumes from the segments it still holds in memory, which skips the
+    // size check a restart makes against the sidecar below. Make it here too: if the file
+    // on the server changed size, finishing the old segments would splice two files.
+    if (!job.segments.empty() && job.totalBytes > 0) {
+        reporter_.reportStateChanged(id, DownloadState::Connecting);
+        std::uint64_t remoteSize = 0;
+        bool supportsRanges = false;
+        std::string fileName;
+        std::string probeError;
+        if (probeRemote(job.request, remoteSize, supportsRanges, fileName, probeError, &job) && remoteSize > 0 &&
+            remoteSize != job.totalBytes) {
+            ORBIT_LOG_WARN("HttpDownloader", "Size on the server changed (" + std::to_string(job.totalBytes) + " -> " +
+                                                 std::to_string(remoteSize) + "); restarting " + job.filePath.string());
+            job.segments.clear();
+            std::error_code ec;
+            std::filesystem::remove(job.metaPath, ec);
+            job.request.existingFilePath = job.filePath.string();
+        }
+    }
+
     if (job.segments.empty()) {
         reporter_.reportStateChanged(id, DownloadState::Connecting);
 
@@ -549,10 +639,23 @@ void HttpDownloader::runSupervisor(DownloadId id) {
         bool supportsRanges = false;
         std::string fileName;
         std::string probeError;
-        const bool probeOk = probeRemote(job.request, remoteSize, supportsRanges, fileName, probeError);
+        const bool probeOk = probeRemote(job.request, remoteSize, supportsRanges, fileName, probeError, &job);
 
-        if (!probeOk) {
+        if (!probeOk && !job.paused.load() && !job.cancelStart.load()) {
             ORBIT_LOG_WARN("HttpDownloader", "Probe failed for " + job.request.source + ": " + probeError);
+        }
+
+        // Paused, cancelled or shut down while the server was being asked: stop before any
+        // file is created, so a later resume simply asks again.
+        if (job.cancelStart.load()) {
+            job.running = false;
+            reporter_.reportStateChanged(id, DownloadState::Cancelled);
+            return;
+        }
+        if (job.paused.load()) {
+            job.running = false;
+            reporter_.reportStateChanged(id, DownloadState::Paused);
+            return;
         }
 
         utils::ensureDirectoryExists(job.request.destinationDir);
@@ -850,11 +953,13 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
 #else
         std::fseek(fp, static_cast<long>(resumeOffset), SEEK_SET);
 #endif
-        WriteContext ctx{fp, &segment.bytesDownloaded, &job.paused, &job.cancelStart, &globalLimiter_, &job.limiter};
+        WriteContext ctx{fp, &segment.bytesDownloaded, &job.paused, &job.cancelStart, &globalLimiter_, &job.limiter,
+                         std::chrono::seconds(stallTimeoutSeconds_.load())};
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
         curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
         while (true) {
-            res = curl_easy_perform(curl);
+            ctx.arm();
+            res = stallAsTimeout(curl_easy_perform(curl), ctx);
             if (res == CURLE_OK || res == CURLE_ABORTED_BY_CALLBACK) break;
             if (!shouldRetry(res)) break;
             segment.bytesDownloaded = 0;
@@ -884,14 +989,16 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
 #else
             std::fseek(fp, static_cast<long>(resumeOffset), SEEK_SET);
 #endif
-            WriteContext ctx{fp, &segment.bytesDownloaded, &job.paused, &job.cancelStart, &globalLimiter_, &job.limiter};
+            WriteContext ctx{fp, &segment.bytesDownloaded, &job.paused, &job.cancelStart, &globalLimiter_, &job.limiter,
+                         std::chrono::seconds(stallTimeoutSeconds_.load())};
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
             curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
 
             const std::string rangeHeader = std::to_string(resumeOffset) + "-" + std::to_string(chunkEnd);
             curl_easy_setopt(curl, CURLOPT_RANGE, rangeHeader.c_str());
 
-            res = curl_easy_perform(curl);
+            ctx.arm();
+            res = stallAsTimeout(curl_easy_perform(curl), ctx);
             if (res != CURLE_OK) {
                 if (res == CURLE_ABORTED_BY_CALLBACK) break;
                 if (shouldRetry(res)) continue;
