@@ -104,7 +104,7 @@ private:
     [[nodiscard]] QByteArray snapshotsPayload() const;
 
     void writeResponse(QTcpSocket* socket, int status, const QByteArray& contentType, const QByteArray& body,
-                        const QList<std::pair<QByteArray, QByteArray>>& extraHeaders = {});
+                        const QList<std::pair<QByteArray, QByteArray>>& extraHeaders = {}, bool close = true);
     void writeJson(QTcpSocket* socket, int status, const QJsonObject& obj,
                     const QList<std::pair<QByteArray, QByteArray>>& extraHeaders = {});
     void writeJsonError(QTcpSocket* socket, int status, const QString& message);

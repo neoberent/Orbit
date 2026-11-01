@@ -312,7 +312,12 @@ void RemoteServer::onSocketReadyRead(QTcpSocket* socket) {
     it->answered = true;
     it->buffer.clear();
     switch (status) {
-        case ParseStatus::TooLarge: writeJsonError(socket, 413, "request too large"); return;
+        case ParseStatus::TooLarge:
+            // The client may still be sending the body. Closing now would reset the
+            // connection (Windows does) and lose the answer, so the rest is read and
+            // dropped until the client hangs up or the sweep closes it.
+            writeResponse(socket, 413, "application/json", R"({"error":"request too large"})", {}, false);
+            return;
         case ParseStatus::Malformed: writeJsonError(socket, 400, "malformed request"); return;
         default: break;
     }
@@ -706,7 +711,8 @@ void RemoteServer::recordFailedLogin(const QString& clientKey) {
 void RemoteServer::recordSuccessfulLogin(const QString& clientKey) { loginAttempts_.remove(clientKey); }
 
 void RemoteServer::writeResponse(QTcpSocket* socket, int status, const QByteArray& contentType,
-                                  const QByteArray& body, const QList<std::pair<QByteArray, QByteArray>>& extraHeaders) {
+                                  const QByteArray& body, const QList<std::pair<QByteArray, QByteArray>>& extraHeaders,
+                                  bool close) {
     bool hasCacheControl = false;
     for (const auto& [key, value] : extraHeaders) {
         if (key.compare("Cache-Control", Qt::CaseInsensitive) == 0) hasCacheControl = true;
@@ -730,7 +736,7 @@ void RemoteServer::writeResponse(QTcpSocket* socket, int status, const QByteArra
     resp += body;
 
     socket->write(resp);
-    socket->disconnectFromHost();
+    if (close) socket->disconnectFromHost();
 }
 
 void RemoteServer::writeJson(QTcpSocket* socket, int status, const QJsonObject& obj,
