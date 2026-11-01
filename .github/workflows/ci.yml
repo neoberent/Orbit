@@ -178,9 +178,19 @@ jobs:
           Invoke-WebRequest $url -OutFile $reference
           $file = Join-Path $env:USERPROFILE 'Downloads\orbit-ci-license.txt'
           $deadline = (Get-Date).AddSeconds(60)
-          while (-not ((Test-Path $file) -and ((Get-Item $file).Length -eq (Get-Item $reference).Length)) -and (Get-Date) -lt $deadline) { Start-Sleep 1 }
+          # Orbit sizes the file up front and keeps it open while writing, so wait until it can
+          # be read and matches (or the time is up), not just until the length is right.
+          $want = (Get-FileHash $reference).Hash
+          $got = $null
+          while ((Get-Date) -lt $deadline) {
+            if (Test-Path $file) {
+              try { $got = (Get-FileHash $file -ErrorAction Stop).Hash } catch { $got = $null }
+              if ($got -eq $want) { break }
+            }
+            Start-Sleep 1
+          }
           if (-not (Test-Path $file)) { throw 'the download never arrived' }
-          if ((Get-FileHash $file).Hash -ne (Get-FileHash $reference).Hash) { throw 'the downloaded file differs from the original' }
+          if ($got -ne $want) { throw 'the downloaded file differs from the original' }
           Write-Host 'Orbit downloaded a file through the native host.'
           & (Join-Path $dir 'yt-dlp.exe') --version
           Get-Content (Join-Path $env:APPDATA 'Orbit\orbit.log') -ErrorAction SilentlyContinue | Select-Object -Last 15
