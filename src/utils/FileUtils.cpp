@@ -2,6 +2,7 @@
 #include "utils/Logger.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <fstream>
 #include <system_error>
@@ -95,6 +96,15 @@ std::string sanitizeFileName(const std::string& name) {
         result.pop_back();
     }
     if (result.empty()) result = "download";
+#if defined(_WIN32)
+    // CON, NUL, COM1 and the like name devices, with or without an extension.
+    std::string stem = result.substr(0, result.find('.'));
+    while (!stem.empty() && stem.back() == ' ') stem.pop_back();
+    for (char& c : stem) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    const bool numbered = stem.size() == 4 && (stem.compare(0, 3, "COM") == 0 || stem.compare(0, 3, "LPT") == 0) &&
+                          stem[3] >= '0' && stem[3] <= '9';
+    if (numbered || stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL") result.insert(result.begin(), '_');
+#endif
     return result;
 }
 

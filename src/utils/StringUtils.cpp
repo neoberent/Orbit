@@ -133,8 +133,10 @@ bool isMediaUrl(std::string_view url) noexcept {
     // Isolate the host component: after "scheme://", drop any "user:pass@" prefix,
     // then stop at the first '/', '?', '#', or ':' (port).
     std::string_view rest = url.substr(url.find("://") + 3);
-    if (const auto at = rest.find('@'); at != std::string_view::npos) rest = rest.substr(at + 1);
-    const auto hostEnd = rest.find_first_of("/?#:");
+    // Only an '@' inside the authority starts the host; "https://a.com/@b.com" is on a.com.
+    rest = rest.substr(0, rest.find_first_of("/?#"));
+    if (const auto at = rest.rfind('@'); at != std::string_view::npos) rest = rest.substr(at + 1);
+    const auto hostEnd = rest.find(':');
     std::string_view host = hostEnd == std::string_view::npos ? rest : rest.substr(0, hostEnd);
 
     std::string lowerHost;

@@ -17,6 +17,7 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QFont>
 #include <QIcon>
@@ -216,6 +217,20 @@ int main(int argc, char* argv[]) {
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, dataDirectory);
     }
+
+#if !defined(_WIN32)
+    // Task files keep the browser cookies a download needs, and the settings hold the proxy
+    // password, so neither should be readable by other users of this PC. (A portable
+    // folder is left as the user set it up.)
+    if (!portable) {
+        const auto ownerOnly = QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner;
+        const QString dataDir = QString::fromStdString(orbit::utils::appDataDir().string());
+        QDir().mkpath(dataDir);
+        QFile::setPermissions(dataDir, ownerOnly);
+        const QString settingsFile = QSettings().fileName();
+        if (QFileInfo::exists(settingsFile)) QFile::setPermissions(settingsFile, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    }
+#endif
 
     // Set up logging before anything else so both the primary instance and a
     // forwarding/secondary launch (which may exit within milliseconds) get logged.

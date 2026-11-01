@@ -94,7 +94,10 @@ std::wstring orbitExecutablePath() {
 HANDLE openPipe(DWORD timeoutMs) {
     const ULONGLONG deadline = GetTickCount64() + timeoutMs;
     while (true) {
-        HANDLE pipe = CreateFileW(kPipeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        // SECURITY_IDENTIFICATION: whoever holds the pipe may learn who connected, but can't
+        // act as this user, even if another account created a pipe of the same name first.
+        HANDLE pipe = CreateFileW(kPipeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                                  SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
         if (pipe != INVALID_HANDLE_VALUE) return pipe;
         const DWORD error = GetLastError();
         if (GetTickCount64() >= deadline) return INVALID_HANDLE_VALUE;
@@ -199,7 +202,16 @@ int connectOnce(const std::string& path) {
     std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
     const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) return -1;
-    if (connect(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0) return fd;
+    if (connect(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0) {
+#if defined(__linux__)
+        // The requests carry browser cookies; only hand them to an Orbit of this same user.
+        ucred peer{};
+        socklen_t length = sizeof(peer);
+        if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &length) == 0 && peer.uid == getuid()) return fd;
+#else
+        return fd;
+#endif
+    }
     close(fd);
     return -1;
 }

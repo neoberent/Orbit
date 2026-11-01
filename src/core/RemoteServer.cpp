@@ -3,6 +3,7 @@
 #include "core/DownloadManager.hpp"
 #include "core/TorrentEngine.hpp"
 #include "core/Types.hpp"
+#include "utils/FileUtils.hpp"
 #include "utils/Logger.hpp"
 #include "utils/StringUtils.hpp"
 
@@ -37,7 +38,12 @@ namespace orbit::core {
 
 namespace {
 
-constexpr qint64 kMaxRequestBytes = 8 * 1024 * 1024;
+// Only a signed-in .torrent upload may carry a large body. Everything else, and anything
+// sent before signing in, is small, so a stranger can't make Orbit buffer megabytes.
+constexpr qint64 kMaxHeaderBytes = 64 * 1024;
+constexpr qint64 kMaxSmallBodyBytes = 64 * 1024;
+constexpr qint64 kMaxUploadBodyBytes = 8 * 1024 * 1024;
+constexpr int kMaxConnections = 128;
 constexpr int kSessionTtlSeconds = 24 * 60 * 60;
 constexpr int kStaleConnectionMs = 15000;
 constexpr int kMaxLoginFailures = 5;
@@ -130,11 +136,12 @@ struct ParsedHttpRequest {
 
 namespace {
 
-ParseStatus tryParseRequest(const QByteArray& buf, ParsedHttpRequest& out) {
-    if (buf.size() > kMaxRequestBytes) return ParseStatus::TooLarge;
-
+// bodyLimit is asked once the headers are in, so the limit can depend on the request.
+template <typename BodyLimit>
+ParseStatus tryParseRequest(const QByteArray& buf, ParsedHttpRequest& out, BodyLimit&& bodyLimit) {
     const int headerEnd = buf.indexOf("\r\n\r\n");
-    if (headerEnd < 0) return ParseStatus::Incomplete;
+    if (headerEnd < 0) return buf.size() > kMaxHeaderBytes ? ParseStatus::TooLarge : ParseStatus::Incomplete;
+    if (headerEnd > kMaxHeaderBytes) return ParseStatus::TooLarge;
 
     const QByteArray headerBlock = buf.left(headerEnd);
     const QList<QByteArray> lines = headerBlock.split('\n');
@@ -166,7 +173,7 @@ ParseStatus tryParseRequest(const QByteArray& buf, ParsedHttpRequest& out) {
         contentLength = out.headers.value(QStringLiteral("content-length")).toLongLong(&ok);
         if (!ok || contentLength < 0) return ParseStatus::Malformed;
     }
-    if (contentLength > kMaxRequestBytes) return ParseStatus::TooLarge;
+    if (contentLength > bodyLimit(out)) return ParseStatus::TooLarge;
 
     const qint64 bodyStart = headerEnd + 4;
     if (buf.size() - bodyStart < contentLength) return ParseStatus::Incomplete;
@@ -272,6 +279,11 @@ bool RemoteServer::verifyCredentials(const QString& user, const QString& passwor
 void RemoteServer::onNewConnection() {
     while (server_ && server_->hasPendingConnections()) {
         QTcpSocket* socket = server_->nextPendingConnection();
+        if (connections_.size() >= kMaxConnections) {
+            socket->abort();
+            socket->deleteLater();
+            continue;
+        }
         ConnectionState state;
         state.openedAtMs = QDateTime::currentMSecsSinceEpoch();
         connections_.insert(socket, state);
@@ -283,16 +295,31 @@ void RemoteServer::onNewConnection() {
 void RemoteServer::onSocketReadyRead(QTcpSocket* socket) {
     auto it = connections_.find(socket);
     if (it == connections_.end()) return;
+    // One request per connection: anything sent after it has been answered is dropped.
+    if (it->answered) {
+        socket->readAll();
+        return;
+    }
 
     it->buffer += socket->readAll();
 
     ParsedHttpRequest req;
-    const ParseStatus status = tryParseRequest(it->buffer, req);
+    const ParseStatus status = tryParseRequest(it->buffer, req, [this](const ParsedHttpRequest& r) {
+        const bool upload = r.method == QLatin1String("POST") && r.path == QLatin1String("/api/torrents/parse");
+        return upload && isAuthenticated(r) ? kMaxUploadBodyBytes : kMaxSmallBodyBytes;
+    });
+    if (status == ParseStatus::Incomplete) return;
+    it->answered = true;
+    it->buffer.clear();
     switch (status) {
-        case ParseStatus::Incomplete: return;
-        case ParseStatus::TooLarge: writeJsonError(socket, 413, "request too large"); return;
+        case ParseStatus::TooLarge:
+            // The client may still be sending the body. Closing now would reset the
+            // connection (Windows does) and lose the answer, so the rest is read and
+            // dropped until the client hangs up or the sweep closes it.
+            writeResponse(socket, 413, "application/json", R"({"error":"request too large"})", {}, false);
+            return;
         case ParseStatus::Malformed: writeJsonError(socket, 400, "malformed request"); return;
-        case ParseStatus::Ok: break;
+        default: break;
     }
 
     handleRequest(socket, req);
@@ -306,9 +333,10 @@ void RemoteServer::cleanupConnection(QTcpSocket* socket) {
 void RemoteServer::sweepStaleConnections() {
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     for (auto it = connections_.begin(); it != connections_.end(); ++it) {
-        if (now - it->openedAtMs > kStaleConnectionMs) {
-            it.key()->disconnectFromHost();
-        }
+        const qint64 age = now - it->openedAtMs;
+        // A client that never reads its answer would keep a closing socket open forever.
+        if (age > 2 * kStaleConnectionMs) it.key()->abort();
+        else if (age > kStaleConnectionMs) it.key()->disconnectFromHost();
     }
     pruneSessions();
     pruneTorrentUploads();
@@ -348,6 +376,15 @@ void RemoteServer::setAllowedHosts(const QStringList& hosts) {
     }
 }
 
+bool RemoteServer::isAllowedOrigin(const QString& originHeader) const {
+    // Browsers send Origin with every POST; scripts and curl usually don't. A page on
+    // another site can't forge it, so a POST it makes is refused even if the session
+    // cookie were to go along.
+    if (originHeader.isEmpty()) return true;
+    const QString h = normalizeHost(originHeader);
+    return !h.isEmpty() && h != QLatin1String("null") && isAllowedHost(h);
+}
+
 bool RemoteServer::isAllowedHost(const QString& hostHeader) const {
     // HTTP/1.1 clients always send Host and browsers can't leave it out, so a request
     // without one can't be a rebinding attack (e.g. an HTTP/1.0 script).
@@ -369,6 +406,12 @@ void RemoteServer::handleRequest(QTcpSocket* socket, const ParsedHttpRequest& re
                       "Orbit doesn't recognise the address \"" + normalizeHost(host).toUtf8() +
                           "\".\n\nIf this is your own Cloudflare tunnel, enter its hostname in Orbit under "
                           "Settings > Remote Access (Named Tunnel, step 6).\n");
+        return;
+    }
+    if (req.method == QLatin1String("POST") && !isAllowedOrigin(req.headers.value(QStringLiteral("origin")))) {
+        ORBIT_LOG_WARN("RemoteServer", "Refused a request sent from another site (Origin \"" +
+                                           req.headers.value(QStringLiteral("origin")).toStdString() + "\")");
+        writeJsonError(socket, 403, "cross-site request refused");
         return;
     }
     if (req.method == QLatin1String("GET") && (req.path == QLatin1String("/") || req.path == QLatin1String("/index.html"))) {
@@ -507,8 +550,16 @@ void RemoteServer::handleAddDownload(QTcpSocket* socket, const ParsedHttpRequest
 }
 
 QString RemoteServer::uploadsDirPath() const {
+#if defined(_WIN32)
+    // %TEMP% is already private to the user.
     const QString dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation) + QStringLiteral("/OrbitRemoteUploads");
     QDir().mkpath(dir);
+#else
+    // Not /tmp: another user could create the folder there first and swap the uploads.
+    const QString dir = QString::fromStdString((orbit::utils::appDataDir() / "remote-uploads").string());
+    QDir().mkpath(dir);
+    QFile::setPermissions(dir, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+#endif
     return dir;
 }
 
@@ -660,7 +711,8 @@ void RemoteServer::recordFailedLogin(const QString& clientKey) {
 void RemoteServer::recordSuccessfulLogin(const QString& clientKey) { loginAttempts_.remove(clientKey); }
 
 void RemoteServer::writeResponse(QTcpSocket* socket, int status, const QByteArray& contentType,
-                                  const QByteArray& body, const QList<std::pair<QByteArray, QByteArray>>& extraHeaders) {
+                                  const QByteArray& body, const QList<std::pair<QByteArray, QByteArray>>& extraHeaders,
+                                  bool close) {
     bool hasCacheControl = false;
     for (const auto& [key, value] : extraHeaders) {
         if (key.compare("Cache-Control", Qt::CaseInsensitive) == 0) hasCacheControl = true;
@@ -672,13 +724,19 @@ void RemoteServer::writeResponse(QTcpSocket* socket, int status, const QByteArra
     resp += "Content-Length: " + QByteArray::number(body.size()) + "\r\n";
     resp += "Connection: close\r\n";
     resp += "X-Content-Type-Options: nosniff\r\n";
+    resp += "X-Frame-Options: DENY\r\n";
+    resp += "Referrer-Policy: no-referrer\r\n";
+    // The web UI is three same-origin files with no inline script, so nothing else may run,
+    // and no other site may frame it.
+    resp += "Content-Security-Policy: default-src 'self'; img-src 'self' data:; object-src 'none'; "
+            "base-uri 'none'; form-action 'self'; frame-ancestors 'none'\r\n";
     if (!hasCacheControl) resp += "Cache-Control: no-store\r\n";
     for (const auto& [key, value] : extraHeaders) resp += key + ": " + value + "\r\n";
     resp += "\r\n";
     resp += body;
 
     socket->write(resp);
-    socket->disconnectFromHost();
+    if (close) socket->disconnectFromHost();
 }
 
 void RemoteServer::writeJson(QTcpSocket* socket, int status, const QJsonObject& obj,

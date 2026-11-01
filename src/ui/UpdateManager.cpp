@@ -1,5 +1,6 @@
 #include "UpdateManager.hpp"
 
+#include "utils/FileUtils.hpp"
 #include "utils/Logger.hpp"
 
 #include <QCoreApplication>
@@ -88,6 +89,16 @@ QString userAgent(const QString& version) {
     return QStringLiteral("Orbit/%1 (Windows)").arg(version);
 #else
     return QStringLiteral("Orbit/%1 (Linux)").arg(version);
+#endif
+}
+
+// Where installers are saved. On Linux not in /tmp: another user could create the folder
+// there first and swap the verified archive before it is unpacked.
+QString updateDir() {
+#if defined(_WIN32)
+    return QStandardPaths::writableLocation(QStandardPaths::TempLocation) + QStringLiteral("/OrbitUpdate");
+#else
+    return QString::fromStdString((orbit::utils::appDataDir() / "updates").string());
 #endif
 }
 
@@ -288,7 +299,7 @@ bool UpdateManager::isAllowedDownloadUrl(const QUrl& url) const {
 }
 
 QString UpdateManager::installerPath() const {
-    const QString dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation) + QStringLiteral("/OrbitUpdate");
+    const QString dir = updateDir();
 #if defined(_WIN32)
     return dir + QStringLiteral("/OrbitSetup-%1.exe").arg(latestVersion_);
 #else
@@ -305,7 +316,7 @@ bool UpdateManager::verifyCachedInstaller() {
 }
 
 void UpdateManager::removeStaleInstallers() const {
-    QDir dir(QStandardPaths::writableLocation(QStandardPaths::TempLocation) + QStringLiteral("/OrbitUpdate"));
+    QDir dir(updateDir());
     if (!dir.exists()) return;
     const QVersionNumber current = parseVersion(currentVersion());
     static const QRegularExpression namePattern(QStringLiteral("^OrbitSetup-(.+?)(?:\\.exe|-linux\\.tar\\.gz)(?:\\.part)?$"));
@@ -328,6 +339,10 @@ void UpdateManager::downloadUpdate() {
 
     const QString finalPath = installerPath();
     QDir().mkpath(QFileInfo(finalPath).absolutePath());
+#if !defined(_WIN32)
+    QFile::setPermissions(QFileInfo(finalPath).absolutePath(),
+                          QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+#endif
     partFile_ = std::make_unique<QFile>(finalPath + QStringLiteral(".part"));
     if (!partFile_->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         const QString reason = partFile_->errorString();
