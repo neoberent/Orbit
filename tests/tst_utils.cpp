@@ -62,6 +62,9 @@ private slots:
         QVERIFY(!isMagnetUri("https://example.com/magnet:?"));
         QVERIFY(isMediaUrl("https://www.youtube.com/watch?v=abc"));
         QVERIFY(!isMediaUrl("https://example.com/file.zip"));
+        QVERIFY(isMediaUrl("https://user@www.youtube.com/watch?v=abc"));
+        QVERIFY(!isMediaUrl("https://example.com/@youtube.com"));
+        QVERIFY(!isMediaUrl("https://example.com/?u=a@youtube.com"));
     }
 
     void sanitizeFileNames() {

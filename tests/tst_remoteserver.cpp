@@ -42,7 +42,7 @@ private:
     // A raw HTTP/1.1 exchange; the server answers and closes, and its event loop runs on
     // this thread, so the reply is awaited with QTest's event-processing waits.
     Reply send(const QByteArray& method, const QByteArray& path, const QByteArray& body = {},
-               const QByteArray& cookie = {}, const QByteArray& host = "127.0.0.1") {
+               const QByteArray& cookie = {}, const QByteArray& host = "127.0.0.1", const QByteArray& extraHeaders = {}) {
         QTcpSocket socket;
         socket.connectToHost(QHostAddress::LocalHost, server_->port());
         QElapsedTimer timer;
@@ -53,6 +53,7 @@ private:
         if (!host.isEmpty()) request += "Host: " + host + "\r\n";
         request += "Connection: close\r\n";
         if (!cookie.isEmpty()) request += "Cookie: " + cookie + "\r\n";
+        request += extraHeaders;
         if (!body.isEmpty()) request += "Content-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\n";
         request += "\r\n" + body;
         socket.write(request);
@@ -184,6 +185,44 @@ private slots:
         QCOMPARE(send("GET", "/", {}, {}, host).status, status);
         const Reply login = send("POST", "/api/login", R"({"username":"admin","password":"correct horse"})", {}, host);
         QCOMPARE(login.status, status);
+    }
+
+    // A page on another site can't send a POST that carries its own Origin.
+    void refusesCrossSitePosts_data() {
+        QTest::addColumn<QByteArray>("origin");
+        QTest::addColumn<int>("status");
+        QTest::newRow("same origin") << QByteArray("http://127.0.0.1:8765") << 200;
+        QTest::newRow("quick tunnel") << QByteArray("https://calm-river-1234.trycloudflare.com") << 200;
+        QTest::newRow("no origin") << QByteArray() << 200;
+        QTest::newRow("other site") << QByteArray("https://evil.example.net") << 403;
+        QTest::newRow("opaque origin") << QByteArray("null") << 403;
+    }
+
+    void refusesCrossSitePosts() {
+        QFETCH(QByteArray, origin);
+        QFETCH(int, status);
+        const QByteArray header = origin.isEmpty() ? QByteArray() : "Origin: " + origin + "\r\n";
+        const Reply login = send("POST", "/api/login", R"({"username":"admin","password":"correct horse"})", {},
+                                 "127.0.0.1", header);
+        QCOMPARE(login.status, status);
+    }
+
+    // Before signing in, nobody can make Orbit buffer a large body.
+    void limitsBodiesBeforeSignIn() {
+        const QByteArray big(200 * 1024, 'x');
+        QCOMPARE(send("POST", "/api/torrents/parse", big).status, 413);
+        QCOMPARE(send("POST", "/api/login", big).status, 413);
+        // Signed in, the same upload is read (and rejected only as a bad torrent).
+        const Reply login = send("POST", "/api/login", R"({"username":"admin","password":"correct horse"})");
+        QCOMPARE(send("POST", "/api/torrents/parse", big, sessionCookie(login)).status, 400);
+    }
+
+    void sendsBrowserSecurityHeaders() {
+        const QByteArray headers = send("GET", "/").headers.toLower();
+        QVERIFY(headers.contains("content-security-policy:"));
+        QVERIFY(headers.contains("frame-ancestors 'none'"));
+        QVERIFY(headers.contains("x-frame-options: deny"));
+        QVERIFY(headers.contains("referrer-policy: no-referrer"));
     }
 
     void normalizesHostNames() {

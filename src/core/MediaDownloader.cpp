@@ -202,7 +202,8 @@ void MediaDownloader::fetchInfo(const QString& url, const std::vector<HttpCookie
          << QStringLiteral("--skip-download") << QStringLiteral("--no-color");
     args << commonArguments(0, request);
     if (!cookieFile.isEmpty()) args << QStringLiteral("--cookies") << cookieFile;
-    args << url;
+    // "--" so the link can never be read as an option.
+    args << QStringLiteral("--") << url;
 
     auto* proc = new QProcess(this);
     proc->setProgram(ytDlpPath);
@@ -354,7 +355,7 @@ void MediaDownloader::launchProcess(DownloadId id) {
         }
     }
 
-    args << QString::fromStdString(job.request.source);
+    args << QStringLiteral("--") << QString::fromStdString(job.request.source);
 
     job.process = std::make_unique<QProcess>();
     QProcess* proc = job.process.get();

@@ -56,6 +56,8 @@ public:
     // The bare, lower-case host name in a Host header, URL or plain name ("" if none).
     [[nodiscard]] static QString normalizeHost(const QString& hostOrUrl);
     [[nodiscard]] bool isAllowedHost(const QString& hostHeader) const;
+    // A POST's Origin header must name one of the hosts above (or be absent).
+    [[nodiscard]] bool isAllowedOrigin(const QString& originHeader) const;
 
 signals:
     void errorOccurred(const QString& message);
@@ -64,6 +66,7 @@ private:
     struct ConnectionState {
         QByteArray buffer;
         qint64 openedAtMs{0};
+        bool answered{false};
     };
     struct LoginAttempts {
         int failures{0};
