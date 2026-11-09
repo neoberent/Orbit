@@ -65,7 +65,7 @@ private:
         qint64 first = 0;
         qint64 last = total - 1;
         bool ranged = false;
-        if (b.ranges) {
+        if (b.ranges && !(b.ignoreRangeOnGet && !isHead)) {
             static const QRegularExpression rangeRe(QStringLiteral("^range:\\s*bytes=(\\d+)-(\\d*)"),
                                                     QRegularExpression::CaseInsensitiveOption);
             for (const QByteArray& line : lines) {

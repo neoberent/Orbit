@@ -70,10 +70,18 @@ struct WriteContext {
     std::chrono::steady_clock::time_point lastData{};
     bool stalled{false};
 
+    // Set for a range request: the answer must be a 206 of at most rangeBytesLeft bytes.
+    // Anything else is written nowhere and flags the job through rangeIgnored.
+    CURL* curl{nullptr};
+    std::uint64_t rangeBytesLeft{0};
+    bool statusChecked{false};
+    std::atomic<bool>* rangeIgnored{nullptr};
+
     // Called before each request.
     void arm() {
         lastData = std::chrono::steady_clock::now();
         stalled = false;
+        statusChecked = false;
     }
 };
 
@@ -81,6 +89,22 @@ size_t curlWriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     auto* ctx = static_cast<WriteContext*>(userdata);
     const size_t total = size * nmemb;
     if (total == 0) return 0;
+    if (ctx->curl) {
+        if (!ctx->statusChecked) {
+            ctx->statusChecked = true;
+            long httpCode = 0;
+            curl_easy_getinfo(ctx->curl, CURLINFO_RESPONSE_CODE, &httpCode);
+            if (httpCode != 206) {
+                ctx->rangeIgnored->store(true);
+                return 0;
+            }
+        }
+        if (total > ctx->rangeBytesLeft) {
+            ctx->rangeIgnored->store(true);
+            return 0;
+        }
+        ctx->rangeBytesLeft -= total;
+    }
     const size_t written = std::fwrite(ptr, 1, total, ctx->file);
     ctx->counter->fetch_add(written, std::memory_order_relaxed);
     if (ctx->jobLimiter) ctx->jobLimiter->consume(written, ctx->paused, ctx->cancelled);
@@ -96,6 +120,8 @@ int curlProgressCallback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl
     if (ctx->paused->load(std::memory_order_relaxed) || ctx->cancelled->load(std::memory_order_relaxed)) {
         return 1;
     }
+    // Another segment found the server ignoring ranges: this one's data is suspect too.
+    if (ctx->rangeIgnored && ctx->rangeIgnored->load(std::memory_order_relaxed)) return 1;
     // A server that keeps the connection open but stops sending (or never starts) would
     // otherwise hold this segment forever.
     if (ctx->stallTimeout.count() > 0 && std::chrono::steady_clock::now() - ctx->lastData > ctx->stallTimeout) {
@@ -709,7 +735,7 @@ void HttpDownloader::runSupervisor(DownloadId id) {
 
         if (!restoredFromMetadata) {
             job.totalBytes = remoteSize;
-            job.supportsRanges = probeOk && supportsRanges && remoteSize > 0;
+            job.supportsRanges = probeOk && supportsRanges && remoteSize > 0 && !job.rangesUnreliable;
 
             if (!utils::preallocateFile(job.filePath, job.totalBytes)) {
                 job.running = false;
@@ -772,7 +798,7 @@ void HttpDownloader::runSupervisor(DownloadId id) {
     // connection count (rebalancing helpers are saved too), so only run up to
     // desiredConnections at once and start the rest as earlier ones complete.
     auto startPendingSegments = [&] {
-        if (job.paused.load() || job.cancelStart.load()) return;
+        if (job.paused.load() || job.cancelStart.load() || job.rangeIgnored.load()) return;
         int running = 0;
         for (const auto& s : job.segments) {
             if (s->thread.joinable() && !s->finished.load()) ++running;
@@ -794,7 +820,7 @@ void HttpDownloader::runSupervisor(DownloadId id) {
 
         const bool allFinished = std::all_of(job.segments.begin(), job.segments.end(),
                                               [](const auto& s) { return s->finished.load(); });
-        if (allFinished || job.paused.load() || job.cancelStart.load()) break;
+        if (allFinished || job.paused.load() || job.cancelStart.load() || job.rangeIgnored.load()) break;
     }
 
     for (auto& seg : job.segments) {
@@ -819,6 +845,26 @@ void HttpDownloader::runSupervisor(DownloadId id) {
         sampleAndReportProgress(job);
         job.running = false;
         reporter_.reportStateChanged(id, DownloadState::Paused);
+        return;
+    }
+
+    if (job.rangeIgnored.load()) {
+        // The server advertised ranges but didn't honour one. Nothing it sent was written,
+        // but the file can't be finished in parts, so fetch it again over one connection.
+        ORBIT_LOG_WARN("HttpDownloader", "The server ignored a byte range; downloading in one piece: " +
+                                             job.request.source);
+        job.rangeIgnored = false;
+        job.rangesUnreliable = true;
+        job.segmentError = false;
+        {
+            std::scoped_lock lock(job.statsMutex);
+            job.lastErrorMessage.clear();
+        }
+        job.segments.clear();
+        std::error_code ec;
+        std::filesystem::remove(job.metaPath, ec);
+        job.request.existingFilePath = job.filePath.string();
+        runSupervisor(id);  // rangesUnreliable makes this a single-piece run, so it can't recurse again
         return;
     }
 
@@ -991,6 +1037,9 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
 #endif
             WriteContext ctx{fp, &segment.bytesDownloaded, &job.paused, &job.cancelStart, &globalLimiter_, &job.limiter,
                          std::chrono::seconds(stallTimeoutSeconds_.load())};
+            ctx.curl = curl;
+            ctx.rangeBytesLeft = chunkEnd - resumeOffset + 1;
+            ctx.rangeIgnored = &job.rangeIgnored;
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
             curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
 
@@ -999,6 +1048,7 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
 
             ctx.arm();
             res = stallAsTimeout(curl_easy_perform(curl), ctx);
+            if (job.rangeIgnored.load()) break;  // the supervisor starts over in one piece
             if (res != CURLE_OK) {
                 if (res == CURLE_ABORTED_BY_CALLBACK) break;
                 if (shouldRetry(res)) continue;

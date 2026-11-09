@@ -143,6 +143,20 @@ private slots:
         QCOMPARE(server_->rangedGetRequests(), 0);
     }
 
+    void serverIgnoringRangesStillGivesAnIntactFile() {
+        // Accept-Ranges is advertised, but every GET returns the whole file. Writing that
+        // at each segment's offset would splice the file, so Orbit must notice and fetch
+        // it in one piece instead.
+        const QByteArray payload = randomPayload(6 * 1024 * 1024 + 77);
+        server_->setBehaviour({.payload = payload, .ignoreRangeOnGet = true, .bytesPerTick = 64 * 1024});
+        QTemporaryDir dir;
+        Recorder rec;
+        HttpDownloader dl(rec.reporter());
+        dl.start(1, request(dir));
+        QVERIFY(rec.waitForState(1, DownloadState::Completed, 60s));
+        QCOMPARE(readFile(rec.path(1)), payload);
+    }
+
     void httpErrorFailsTheDownload() {
         server_->setBehaviour({.payload = randomPayload(1000), .status = 404});
         QTemporaryDir dir;

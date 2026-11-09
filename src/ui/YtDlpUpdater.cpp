@@ -179,6 +179,8 @@ void YtDlpUpdater::queryVersion(const QString& exe, std::function<void(const QSt
     auto* process = new QProcess(this);
     process->setProgram(exe);
     process->setArguments({QStringLiteral("--version")});
+    // Not Orbit's own working folder: yt-dlp would read a yt-dlp.conf planted there.
+    process->setWorkingDirectory(QString::fromStdWString(orbit::utils::appDataDir().wstring()));
     process->setProcessChannelMode(QProcess::MergedChannels);
     auto finished = std::make_shared<bool>(false);
     auto finish = [process, done, finished](const QString& version) {
