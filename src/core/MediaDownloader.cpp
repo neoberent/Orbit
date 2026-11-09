@@ -64,6 +64,16 @@ QString platformExeName(const char* baseName) {
 #endif
 }
 
+// yt-dlp reads a yt-dlp.conf from its working folder, and an --exec line in one runs any
+// command. Orbit may have been started from Downloads (Windows does that when a .torrent
+// there is opened), where a web page can drop such a file, so yt-dlp runs in Orbit's own
+// data folder instead.
+QString ytDlpWorkingDirectory() {
+    const QString dir = QString::fromStdWString(utils::appDataDir().wstring());
+    QDir().mkpath(dir);
+    return dir;
+}
+
 // We're called from a slot connected to the QProcess's own finished() signal, so the
 // process object must not be destroyed synchronously here (its signal emission is
 // still unwinding the call stack) — schedule the actual delete for later instead.
@@ -208,6 +218,7 @@ void MediaDownloader::fetchInfo(const QString& url, const std::vector<HttpCookie
     auto* proc = new QProcess(this);
     proc->setProgram(ytDlpPath);
     proc->setArguments(args);
+    proc->setWorkingDirectory(ytDlpWorkingDirectory());
     auto* timeout = new QTimer(proc);
     timeout->setSingleShot(true);
     connect(timeout, &QTimer::timeout, proc, [proc] { proc->kill(); });
@@ -299,7 +310,8 @@ void MediaDownloader::launchProcess(DownloadId id) {
 
     utils::ensureDirectoryExists(job.request.destinationDir);
 
-    const QString destDir = QString::fromStdString(job.request.destinationDir);
+    // '%' is yt-dlp's template marker, so a folder named like "%(id)s" is doubled to stay literal.
+    const QString destDir = QString::fromStdString(job.request.destinationDir).replace(u'%', QStringLiteral("%%"));
     // "%(title)B" truncates to a byte budget so absurdly long titles don't blow past
     // filesystem filename limits; yt-dlp still sanitizes illegal characters itself.
     const QString outputTemplate = destDir + QStringLiteral("/%(title).200B [%(id)s].%(ext)s");
@@ -361,6 +373,7 @@ void MediaDownloader::launchProcess(DownloadId id) {
     QProcess* proc = job.process.get();
     proc->setProgram(ytDlpPath);
     proc->setArguments(args);
+    proc->setWorkingDirectory(ytDlpWorkingDirectory());
 
     QObject::connect(proc, &QProcess::readyReadStandardOutput, this, [this, id] { onReadyReadStdout(id); });
     QObject::connect(proc, &QProcess::readyReadStandardError, this, [this, id] { onReadyReadStderr(id); });

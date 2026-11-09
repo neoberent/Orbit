@@ -36,6 +36,13 @@ std::optional<std::string> extractDownloadUrl(const std::string& uri) {
 
         std::string decoded = orbit::utils::trim(orbit::utils::urlDecode(pair.substr(eq + 1)));
         if (decoded.empty()) return std::nullopt;
+        // Any web page can open an orbit:// link, so it may only carry a web link or a
+        // magnet. A path would make Orbit read that file, and on Windows a network path
+        // (\\server\share\x.torrent) sends the user's credentials to that server.
+        const auto hasScheme = [&decoded](std::string_view scheme) {
+            return decoded.size() > scheme.size() && orbit::utils::iequals(std::string_view(decoded).substr(0, scheme.size()), scheme);
+        };
+        if (!hasScheme("http://") && !hasScheme("https://") && !orbit::utils::isMagnetUri(decoded)) return std::nullopt;
         return decoded;
     }
     return std::nullopt;

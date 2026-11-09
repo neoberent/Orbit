@@ -15,7 +15,7 @@ function(orbit_add_test name)
     )
 endfunction()
 
-orbit_add_test(tst_utils orbit_core)
+orbit_add_test(tst_utils orbit_services)
 orbit_add_test(tst_httpdownloader orbit_core)
 orbit_add_test(tst_downloadmanager orbit_core)
 orbit_add_test(tst_remoteserver orbit_services)

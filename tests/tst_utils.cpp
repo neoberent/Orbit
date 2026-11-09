@@ -1,8 +1,12 @@
+#include "core/MediaDownloader.hpp"
+#include "core/ProtocolHandler.hpp"
 #include "utils/FileUtils.hpp"
 #include "utils/Hashing.hpp"
 #include "utils/SpeedLimiter.hpp"
 #include "utils/StringUtils.hpp"
 
+#include <QDir>
+#include <QFile>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -149,6 +153,55 @@ private slots:
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         // 500 kB at 1 MB/s.
         QVERIFY2(seconds > 0.35 && seconds < 1.5, qPrintable(QString::number(seconds)));
+    }
+
+    void protocolLinksOnlyCarryWebLinks() {
+        using orbit::core::protocol::extractDownloadUrl;
+        QCOMPARE(extractDownloadUrl("orbit://add?url=https%3A%2F%2Fexample.com%2Fa.zip").value_or(""),
+                 std::string("https://example.com/a.zip"));
+        QCOMPARE(extractDownloadUrl("orbit://add/?url=HTTP://example.com/a").value_or(""),
+                 std::string("HTTP://example.com/a"));
+        QCOMPARE(extractDownloadUrl("orbit://add?url=magnet%3A%3Fxt%3Durn%3Abtih%3Aabc").value_or(""),
+                 std::string("magnet:?xt=urn:btih:abc"));
+        // A web page must not make Orbit open a file: a network path would send the
+        // user's Windows credentials to that server.
+        QVERIFY(!extractDownloadUrl("orbit://add?url=%5C%5Cevil.example%5Cs%5Cx.torrent"));
+        QVERIFY(!extractDownloadUrl("orbit://add?url=//evil.example/s/x.torrent"));
+        QVERIFY(!extractDownloadUrl("orbit://add?url=C%3A%5Cx.torrent"));
+        QVERIFY(!extractDownloadUrl("orbit://add?url=file%3A%2F%2F%2Fetc%2Fx.torrent"));
+        QVERIFY(!extractDownloadUrl("orbit://add?url=ftp%3A%2F%2Fhost%2Fx"));
+    }
+
+    void ytDlpNeverStartsInTheCurrentFolder() {
+#if defined(_WIN32)
+        QSKIP("a shell script stands in for yt-dlp");
+#else
+        // yt-dlp reads a yt-dlp.conf from its working folder, and its --exec runs commands.
+        // Orbit may have been started from Downloads, where a web page can drop that file.
+        QTemporaryDir fakeDir;
+        QTemporaryDir launchDir;
+        QVERIFY(fakeDir.isValid() && launchDir.isValid());
+        const QString marker = fakeDir.filePath(QStringLiteral("cwd.txt"));
+        const QString script = fakeDir.filePath(QStringLiteral("yt-dlp"));
+        writeFile(script.toStdString(), "#!/bin/sh\npwd > '" + marker.toStdString() + "'\nexit 1\n");
+        QFile::setPermissions(script, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+
+        const QString previous = QDir::currentPath();
+        QVERIFY(QDir::setCurrent(launchDir.path()));
+        orbit::core::MediaDownloader::setYtDlpPathOverride(script);
+        bool finished = false;
+        {
+            orbit::core::MediaDownloader media(orbit::core::ProgressReporter{});
+            media.fetchInfo(QStringLiteral("https://example.com/v"), {}, [&](const orbit::core::MediaInfo&) { finished = true; });
+            QTRY_VERIFY_WITH_TIMEOUT(finished, 10000);
+        }
+        orbit::core::MediaDownloader::setYtDlpPathOverride({});
+        QDir::setCurrent(previous);
+
+        const QString ranIn = QString::fromStdString(readFile(marker.toStdString())).trimmed();
+        QVERIFY2(!ranIn.isEmpty(), "the stand-in yt-dlp didn't run");
+        QVERIFY2(QDir(ranIn).canonicalPath() != QDir(launchDir.path()).canonicalPath(), qPrintable(ranIn));
+#endif
     }
 
     void speedLimiterUnlimitedAndAbort() {

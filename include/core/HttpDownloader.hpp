@@ -90,6 +90,11 @@ private:
         std::atomic<bool> cancelStart{false};
         std::atomic<bool> running{false};
         std::atomic<bool> segmentError{false};
+        // A range request came back as something other than that range (a whole-file 200
+        // or an oversized 206). The parts so far can't be trusted, so the job starts over
+        // in one piece, and rangesUnreliable keeps it from trying ranges again.
+        std::atomic<bool> rangeIgnored{false};
+        bool rangesUnreliable{false};
         // Set once the file is complete. A finished job no longer claims its path, so a
         // later download with the same name can replace it or ask about it.
         std::atomic<bool> completed{false};

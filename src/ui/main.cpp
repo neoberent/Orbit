@@ -62,6 +62,13 @@ constexpr auto kSingleInstanceKey = "OrbitDownloadManager.SingleInstance";
 // path (from Windows launching us as the file's registered app) — and returns it, or
 // an empty string if there isn't one.
 QString extractPendingProtocolUrl(int argc, char* argv[]) {
+    // A launch for an orbit:// link only takes that link. Windows builds the command line
+    // from the link's text, so anything else on it came from the web page as well, and a
+    // .torrent path (\\server\share\x.torrent) must never be opened on a page's say-so.
+    bool protocolLaunch = false;
+    for (int i = 1; i < argc; ++i) {
+        if (orbit::core::protocol::isOrbitUri(argv[i])) protocolLaunch = true;
+    }
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (auto decoded = orbit::core::protocol::extractDownloadUrl(arg)) {
@@ -73,6 +80,7 @@ QString extractPendingProtocolUrl(int argc, char* argv[]) {
             ORBIT_LOG_WARN("protocol", "Received an orbit:// argument that failed to parse: " + arg);
             continue;
         }
+        if (protocolLaunch) continue;
         QString argQ = QString::fromStdString(arg);
         // Linux desktops may hand an opened file over as a file:// URL.
         if (argQ.startsWith(QLatin1String("file://"), Qt::CaseInsensitive)) argQ = QUrl(argQ).toLocalFile();

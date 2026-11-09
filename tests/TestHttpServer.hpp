@@ -21,6 +21,9 @@ public:
     struct Behaviour {
         QByteArray payload;
         bool ranges{true};
+        // Advertises ranges but answers every GET with the whole file (200), like a server
+        // or proxy that drops the Range header.
+        bool ignoreRangeOnGet{false};
         // 0 = send everything at once; otherwise this many bytes every 10 ms per connection.
         int bytesPerTick{0};
         // Delays the response headers (HEAD and GET) by this long.
