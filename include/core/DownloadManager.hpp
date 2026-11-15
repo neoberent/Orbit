@@ -30,7 +30,9 @@ public:
     // One task as ordered key/value pairs: the same shape as a .task file.
     using TaskRecord = std::vector<std::pair<std::string, std::string>>;
 
-    explicit DownloadManager(std::filesystem::path stateDir);
+    // networkInterface: the interface lock from the settings, applied before anything
+    // connects (empty = any).
+    explicit DownloadManager(std::filesystem::path stateDir, const std::string& networkInterface = {});
     ~DownloadManager();
 
     DownloadManager(const DownloadManager&) = delete;
@@ -84,6 +86,13 @@ public:
     [[nodiscard]] const std::filesystem::path& defaultDownloadDir() const noexcept;
 
     void setProxy(const ProxySettings& proxy);
+    // With seeding off, a torrent that has every byte but sits paused (paused while it
+    // seeded, or from before seeding was switched off) is marked Completed.
+    void completeFinishedPausedTorrents();
+    // Binds every connection (direct, torrent and media downloads) to one network
+    // interface, such as a VPN's wg0 or tun0. While that interface is down nothing
+    // connects, so traffic never falls back to the normal connection. Empty = any.
+    void setNetworkInterface(const std::string& interfaceName);
 
     // What a direct download does when its file name is already taken, unless the task
     // carries its own choice. Applies to downloads that haven't picked a file yet.

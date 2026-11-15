@@ -3,6 +3,7 @@
 #include "core/IDownloader.hpp"
 #include <libtorrent/fwd.hpp>
 #include <filesystem>
+#include <string>
 #include <memory>
 #include <mutex>
 #include <stop_token>
@@ -18,6 +19,8 @@ struct TorrentEngineSettings {
     int uploadRateLimitBytesPerSec{0};
     int listenPort{51413};
     bool enableDht{true};
+    // Locked to this interface from the first moment (see setNetworkInterface).
+    std::string networkInterface;
 };
 
 class TorrentEngine final : public IDownloader {
@@ -45,10 +48,16 @@ public:
     void setUploadRateLimit(int bytesPerSec);
     void setTorrentRateLimits(DownloadId id, std::uint64_t downloadBytesPerSec, std::uint64_t uploadBytesPerSec);
     void setProxy(const ProxySettings& proxy);
+    // Listens and connects only through this interface (empty = all of them).
+    void setNetworkInterface(const std::string& interfaceName);
+    void resolveBootstrapThrough(const std::string& interfaceName);
 
     // Stops seeding once a torrent has uploaded ratio x its size, or has seeded for
     // minutes. 0 disables either limit; both 0 means seed indefinitely.
     void setSeedingLimits(double ratio, int minutes);
+    // Off: a torrent stops as soon as it has finished downloading. On: it keeps sharing
+    // until the seeding limits above (if any) are reached.
+    void setSeedAfterDownload(bool seed);
 
     [[nodiscard]] std::vector<TorrentFileStatus> files(DownloadId id) const;
     // priority: 0 = skip, 1 = low, 4 = normal, 7 = high.

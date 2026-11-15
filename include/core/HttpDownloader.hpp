@@ -3,6 +3,7 @@
 #include "core/IDownloader.hpp"
 #include "utils/SpeedLimiter.hpp"
 #include <atomic>
+#include <deque>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -49,10 +50,15 @@ public:
     void relocate(DownloadId id, const std::filesystem::path& newFilePath);
 
     void setProxy(const ProxySettings& proxy);
+    // Every connection goes out through this interface only (curl's "if!" binding), or
+    // fails while it's down. Empty = any interface.
+    void setNetworkInterface(const std::string& interfaceName);
 
     // A connection that delivers no data for this long is treated as dropped and
     // retried, instead of waiting on a silent server forever. Default 60 s.
     void setStallTimeout(std::chrono::seconds timeout);
+    // How often a running download writes a crash-safe resume checkpoint. Default 15 s.
+    void setCheckpointInterval(std::chrono::milliseconds interval);
 
     // Asks the server about a link (size, range support, file name) without downloading
     // it, using the request's cookies, referrer and user agent. Blocks for up to ~50 s.
@@ -111,6 +117,10 @@ private:
         // it's currently sharing the per-download speed cap with, without touching
         // the segments vector itself (only the supervisor thread does that).
         std::atomic<int> activeSegments{0};
+        // Requests on the wire right now. A segment takes a slot (below desiredConnections)
+        // before each request, so once a server has said how many connections it allows,
+        // the other segments wait their turn instead of being turned away and backing off.
+        std::atomic<int> requestsInFlight{0};
         // 0 = unlimited.
         orbit::utils::SpeedLimiter limiter;
 
@@ -121,6 +131,9 @@ private:
         std::string lastErrorMessage;
         std::uint64_t bytesAtLastSample{0};
         std::chrono::steady_clock::time_point lastSampleTime;
+        // (time, bytes) over the last couple of seconds: the speed shown is measured across
+        // this window, so it doesn't jump with every 400 ms sample.
+        std::deque<std::pair<std::chrono::steady_clock::time_point, std::uint64_t>> rateWindow;
         std::chrono::steady_clock::time_point startTime;
     };
 
@@ -143,10 +156,22 @@ private:
     // (it always gives up on shutdown).
     bool probeRemote(const DownloadRequest& request, std::uint64_t& outSize,
                      bool& outSupportsRanges, std::string& outFileName,
-                     std::string& outError, const Job* job = nullptr) const;
+                     std::string& outError, const Job* job = nullptr, std::string* outChecksum = nullptr) const;
+    // A checksum published next to the file (name.sha256 / .sha512 / .sha256sum), looked
+    // for when the link looks like a release download. Empty when there's none.
+    [[nodiscard]] std::string fetchPublishedChecksum(const DownloadRequest& request, const std::string& fileName) const;
     void applyRequestOptions(void* curl, const DownloadRequest& request) const;
 
-    void saveResumeMetadata(Job& job) const;
+    // curl_easy_perform, except that with downloads locked to an interface every host is
+    // looked up through that interface (InterfaceDns) and handed to curl, and curl may
+    // never use the system resolver. A redirect to a new host is looked up and retried.
+    // Returns the CURLcode (as int: this header doesn't include curl).
+    [[nodiscard]] int perform(void* curl, const std::string& url) const;
+
+    // whileRunning: a checkpoint taken during the download (so a crash or power cut can
+    // resume). Running segments are recorded a little behind where they are, since their
+    // last writes may not have reached the disk yet; the file's data is synced first.
+    void saveResumeMetadata(Job& job, bool whileRunning = false) const;
     bool loadResumeMetadata(Job& job) const;
     void sampleAndReportProgress(Job& job);
     void finalizeJob(DownloadId id, bool success, const std::string& error = {});
@@ -157,6 +182,7 @@ private:
     orbit::utils::SpeedLimiter globalLimiter_;
     mutable std::mutex proxyMutex_;
     ProxySettings proxy_;
+    std::string networkInterface_;
 
     // Supervisor threads are detached (a state-change listener may erase their Job from
     // inside the supervisor's own callback, so nobody can own and join them), but every
@@ -168,6 +194,15 @@ private:
     // Set by the destructor: aborts in-flight probes and refuses new supervisors.
     std::atomic<bool> shuttingDown_{false};
     std::atomic<long> stallTimeoutSeconds_{60};
+    std::atomic<long> checkpointIntervalMs_{15000};
+
+    // Connections a host has shown it allows (it answered more with 429/503), with when
+    // that was learned. New downloads from it start at that many for a while instead of
+    // being turned away again.
+    [[nodiscard]] int connectionsFor(const std::string& source, int wanted) const;
+    void rememberHostLimit(const std::string& source, int connections);
+    mutable std::mutex hostLimitsMutex_;
+    std::unordered_map<std::string, std::pair<int, std::chrono::steady_clock::time_point>> hostLimits_;
 };
 
 }

@@ -55,7 +55,8 @@ std::string movePath(const std::filesystem::path& from, const std::filesystem::p
 
 }
 
-DownloadManager::DownloadManager(std::filesystem::path stateDir) : stateDir_(std::move(stateDir)) {
+DownloadManager::DownloadManager(std::filesystem::path stateDir, const std::string& networkInterface)
+    : stateDir_(std::move(stateDir)) {
     utils::ensureDirectoryExists(stateDir_);
     defaultDownloadDir_ = utils::defaultDownloadsDir();
     utils::ensureDirectoryExists(defaultDownloadDir_);
@@ -75,12 +76,31 @@ DownloadManager::DownloadManager(std::filesystem::path stateDir) : stateDir_(std
     };
     reporter.onNotice = [this](DownloadId id, bool ok, const std::string& message) { notifyNotice(id, ok, message); };
     reporter.onFileConflict = [this](DownloadId id, const std::string& path) { onFileConflict(id, path); };
+    reporter.onChecksumFound = [this](DownloadId id, const std::string& checksum) {
+        // The user's own expected checksum always wins over one the server published.
+        std::optional<TaskSnapshot> snap;
+        {
+            std::scoped_lock lock(mutex_);
+            DownloadTask* task = findTaskLocked(id);
+            if (!task || !task->request().expectedChecksum.empty()) return;
+            const auto spec = utils::parseChecksum(checksum);
+            if (!spec) return;
+            task->updateRequest([&spec](DownloadRequest& r) { r.expectedChecksum = spec->toString(); });
+            persistTask(*task);
+            snap = task->snapshot();
+        }
+        ORBIT_LOG_INFO("DownloadManager", "Task " + std::to_string(id) + ": the server published a checksum; the file will be verified");
+        if (snap) notifyUpdate(*snap);
+    };
 
     httpDownloader_ = std::make_unique<HttpDownloader>(reporter);
     mediaDownloader_ = std::make_unique<MediaDownloader>(reporter);
+    httpDownloader_->setNetworkInterface(networkInterface);
+    mediaDownloader_->setNetworkInterface(networkInterface);
 
     TorrentEngineSettings torrentSettings;
     torrentSettings.defaultSavePath = defaultDownloadDir_;
+    torrentSettings.networkInterface = networkInterface;
     torrentEngine_ = std::make_unique<TorrentEngine>(reporter, torrentSettings);
 
     loadPersistedTasksAndResume();
@@ -757,6 +777,29 @@ void DownloadManager::setProxy(const ProxySettings& proxy) {
     mediaDownloader_->setProxy(proxy);
 }
 
+void DownloadManager::completeFinishedPausedTorrents() {
+    std::vector<TaskSnapshot> changed;
+    {
+        std::scoped_lock lock(mutex_);
+        for (auto& [id, task] : tasks_) {
+            if (task->type() != DownloadType::Torrent || busy_.contains(id)) continue;
+            const auto snap = task->snapshot();
+            if (snap.state != DownloadState::Paused || snap.stats.totalBytes == 0 ||
+                snap.stats.bytesDownloaded < snap.stats.totalBytes) continue;
+            task->setState(DownloadState::Completed);
+            persistTask(*task);
+            changed.push_back(task->snapshot());
+        }
+    }
+    for (const auto& snap : changed) notifyUpdate(snap);
+}
+
+void DownloadManager::setNetworkInterface(const std::string& interfaceName) {
+    httpDownloader_->setNetworkInterface(interfaceName);
+    torrentEngine_->setNetworkInterface(interfaceName);
+    mediaDownloader_->setNetworkInterface(interfaceName);
+}
+
 int DownloadManager::subscribeUpdates(UpdateCallback callback) {
     std::scoped_lock lock(subsMutex_);
     const int token = nextSubToken_++;
@@ -844,8 +887,11 @@ void DownloadManager::onStateChanged(DownloadId id, DownloadState state) {
         // now use. Paused was previously missing here, so pausing an active download
         // would not let the next queued item start until something else happened to
         // re-pump the queue.
+        // A torrent that starts seeding has finished downloading too, and seeding doesn't
+        // take one of the download slots.
         if (state == DownloadState::Completed || state == DownloadState::Error ||
-            state == DownloadState::Cancelled || state == DownloadState::Paused) {
+            state == DownloadState::Cancelled || state == DownloadState::Paused ||
+            (state == DownloadState::Seeding && previous != DownloadState::Seeding)) {
             toStart = pumpQueueLocked();
         }
     }

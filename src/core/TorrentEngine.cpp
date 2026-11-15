@@ -1,4 +1,5 @@
 #include "core/TorrentEngine.hpp"
+#include "core/InterfaceDns.hpp"
 
 #include "utils/FileUtils.hpp"
 #include "utils/Logger.hpp"
@@ -145,10 +146,21 @@ struct TorrentEngine::Impl {
 
     double seedRatioLimit{0};
     int seedMinutesLimit{0};
+    bool seedAfterDownload{false};
 
     mutable std::mutex mutex;
     std::unordered_map<DownloadId, Entry> entries;
+
+    // Looks up the DHT's bootstrap routers through the locked interface. Declared last, so
+    // it's stopped and joined before the session it configures goes away.
+    std::jthread bootstrapResolver;
 };
+
+namespace {
+const char* const kDefaultBootstrapNodes = "dht.libtorrent.org:25401";
+const std::pair<const char*, int> kBootstrapRouters[] = {
+    {"dht.libtorrent.org", 25401}, {"router.bittorrent.com", 6881}, {"dht.transmissionbt.com", 6881}};
+}
 
 TorrentEngine::TorrentEngine(ProgressReporter reporter, TorrentEngineSettings settings)
     : reporter_(std::move(reporter)) {
@@ -161,16 +173,23 @@ TorrentEngine::TorrentEngine(ProgressReporter reporter, TorrentEngineSettings se
     utils::ensureDirectoryExists(impl_->settings.defaultSavePath);
 
     lt::settings_pack pack;
-    pack.set_str(lt::settings_pack::user_agent, "Orbit/1.0");
+    pack.set_str(lt::settings_pack::user_agent, std::string("Orbit/") + ORBIT_VERSION);
     pack.set_int(lt::settings_pack::alert_mask, lt::alert_category::error | lt::alert_category::status |
                                                      lt::alert_category::tracker | lt::alert_category::port_mapping |
                                                      lt::alert_category::dht | lt::alert_category::storage);
     pack.set_bool(lt::settings_pack::enable_dht, settings.enableDht);
     pack.set_int(lt::settings_pack::download_rate_limit, settings.downloadRateLimitBytesPerSec);
     pack.set_int(lt::settings_pack::upload_rate_limit, settings.uploadRateLimitBytesPerSec);
-    pack.set_str(lt::settings_pack::listen_interfaces,
-                 "0.0.0.0:" + std::to_string(settings.listenPort) + ",[::]:" +
-                     std::to_string(settings.listenPort));
+    if (settings.networkInterface.empty()) {
+        pack.set_str(lt::settings_pack::listen_interfaces,
+                     "0.0.0.0:" + std::to_string(settings.listenPort) + ",[::]:" + std::to_string(settings.listenPort));
+    } else {
+        // Locked before the session exists, so not even its first packets or lookups
+        // leave over another connection.
+        pack.set_str(lt::settings_pack::listen_interfaces, settings.networkInterface + ":" + std::to_string(settings.listenPort));
+        pack.set_str(lt::settings_pack::outgoing_interfaces, settings.networkInterface);
+        pack.set_str(lt::settings_pack::dht_bootstrap_nodes, "");
+    }
 
     pack.set_int(lt::settings_pack::mixed_mode_algorithm, lt::settings_pack::prefer_tcp);
 
@@ -204,6 +223,27 @@ TorrentEngine::TorrentEngine(ProgressReporter reporter, TorrentEngineSettings se
     impl_->session = std::make_unique<lt::session>(std::move(params));
 
     alertThread_ = std::jthread([this](std::stop_token st) { alertLoop(st); });
+    if (!impl_->settings.networkInterface.empty()) resolveBootstrapThrough(impl_->settings.networkInterface);
+}
+
+void TorrentEngine::resolveBootstrapThrough(const std::string& interfaceName) {
+    // libtorrent would look the routers' names up with the system resolver, outside the
+    // locked interface; give it addresses found through the interface instead.
+    impl_->bootstrapResolver = std::jthread([this, interfaceName](std::stop_token stop) {
+        std::string nodes;
+        for (const auto& [host, port] : kBootstrapRouters) {
+            if (stop.stop_requested()) return;
+            for (const std::string& address : InterfaceDns::resolve(host, interfaceName)) {
+                if (!nodes.empty()) nodes += ',';
+                nodes += (address.find(':') != std::string::npos ? "[" + address + "]" : address) + ":" + std::to_string(port);
+            }
+        }
+        if (stop.stop_requested() || nodes.empty()) return;
+        lt::settings_pack pack;
+        pack.set_str(lt::settings_pack::dht_bootstrap_nodes, nodes);
+        impl_->session->apply_settings(std::move(pack));
+        ORBIT_LOG_INFO("TorrentEngine", "DHT bootstrap routers looked up through " + interfaceName);
+    });
 }
 
 TorrentEngine::~TorrentEngine() {
@@ -564,6 +604,27 @@ void TorrentEngine::setProxy(const ProxySettings& proxy) {
     impl_->session->apply_settings(std::move(pack));
 }
 
+void TorrentEngine::setNetworkInterface(const std::string& interfaceName) {
+    const std::string port = std::to_string(impl_->settings.listenPort);
+    lt::settings_pack pack;
+    // libtorrent takes device names in both lists; with a device that's down it neither
+    // listens nor connects, so peers never see the real address.
+    pack.set_str(lt::settings_pack::listen_interfaces,
+                 interfaceName.empty() ? "0.0.0.0:" + port + ",[::]:" + port : interfaceName + ":" + port);
+    pack.set_str(lt::settings_pack::outgoing_interfaces, interfaceName);
+    pack.set_str(lt::settings_pack::dht_bootstrap_nodes, interfaceName.empty() ? kDefaultBootstrapNodes : "");
+    impl_->session->apply_settings(std::move(pack));
+    impl_->settings.networkInterface = interfaceName;
+    if (!interfaceName.empty()) resolveBootstrapThrough(interfaceName);
+    ORBIT_LOG_INFO("torrent", interfaceName.empty() ? std::string("Torrents use any network interface")
+                                                    : "Torrents bound to network interface " + interfaceName);
+}
+
+void TorrentEngine::setSeedAfterDownload(bool seed) {
+    std::scoped_lock lock(impl_->mutex);
+    impl_->seedAfterDownload = seed;
+}
+
 void TorrentEngine::setSeedingLimits(double ratio, int minutes) {
     std::scoped_lock lock(impl_->mutex);
     impl_->seedRatioLimit = std::max(0.0, ratio);
@@ -873,22 +934,25 @@ void TorrentEngine::alertLoop(std::stop_token stopToken) {
                 auto it = impl_->entries.find(id);
                 if (it != impl_->entries.end()) {
                     const bool pausedNow = (st.flags & lt::torrent_flags::paused) == lt::torrent_flags::paused;
-                    if (st.is_seeding && !pausedNow && !it->second.seedingStopped &&
-                        (impl_->seedRatioLimit > 0 || impl_->seedMinutesLimit > 0)) {
+                    const bool limited = !impl_->seedAfterDownload || impl_->seedRatioLimit > 0 || impl_->seedMinutesLimit > 0;
+                    if (st.is_seeding && !pausedNow && !it->second.seedingStopped && limited) {
                         const double wanted = static_cast<double>(std::max<std::int64_t>(1, st.total_wanted));
                         const double ratio = static_cast<double>(st.all_time_upload) / wanted;
                         const auto seededMinutes = std::chrono::duration_cast<std::chrono::minutes>(st.seeding_duration).count();
-                        if ((impl_->seedRatioLimit > 0 && ratio >= impl_->seedRatioLimit) ||
+                        if (!impl_->seedAfterDownload ||
+                            (impl_->seedRatioLimit > 0 && ratio >= impl_->seedRatioLimit) ||
                             (impl_->seedMinutesLimit > 0 && seededMinutes >= impl_->seedMinutesLimit)) {
                             it->second.seedingStopped = true;
                             stopSeedingNow = true;
                         }
                     }
-                    seedingStopped = it->second.seedingStopped;
+                    // With seeding off, a finished torrent that's paused (for example
+                    // after Orbit was closed while it seeded) is simply complete.
+                    seedingStopped = it->second.seedingStopped || !impl_->seedAfterDownload;
                 }
             }
             if (stopSeedingNow) {
-                ORBIT_LOG_INFO("TorrentEngine", "Download " + std::to_string(id) + " reached its seeding limit; stopping");
+                ORBIT_LOG_INFO("TorrentEngine", "Download " + std::to_string(id) + " finished; stopping (seeding is off or its limit was reached)");
                 handle.unset_flags(lt::torrent_flags::auto_managed);
                 handle.pause();
                 seedingStopped = true;

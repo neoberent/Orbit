@@ -67,6 +67,9 @@ public:
     [[nodiscard]] static QString resolveFfmpegPath();
 
     void setProxy(const ProxySettings& proxy);
+    // yt-dlp can only bind to an address, so it gets the interface's current one; while
+    // the interface has none, media downloads fail instead of using another connection.
+    void setNetworkInterface(const std::string& interfaceName);
     // "" (off), or a browser yt-dlp can read cookies from: "firefox", "chrome", "edge", "brave".
     void setCookiesFromBrowser(const QString& browser);
 
@@ -86,6 +89,8 @@ private:
         bool pausedByUser{false};
         bool cancelRequested{false};
         bool startedDownloadPhase{false};
+        // Set after the browser's cookie store couldn't be read: the retry goes without.
+        bool withoutBrowserCookies{false};
         DownloadStats lastStats;
 
         // yt-dlp reports progress separately per stream (video, then audio, then the
@@ -113,6 +118,9 @@ private:
     mutable std::mutex optionsMutex_;
     ProxySettings proxy_;
     QString cookiesFromBrowser_;
+    std::string networkInterface_;
+    // Empty when no interface is set; "!" when one is set but has no address right now.
+    [[nodiscard]] QString sourceAddress() const;
 };
 
 }

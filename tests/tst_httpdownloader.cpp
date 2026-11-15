@@ -2,6 +2,7 @@
 #include "core/HttpDownloader.hpp"
 
 #include <QRandomGenerator>
+#include <QElapsedTimer>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -155,6 +156,121 @@ private slots:
         dl.start(1, request(dir));
         QVERIFY(rec.waitForState(1, DownloadState::Completed, 60s));
         QCOMPARE(readFile(rec.path(1)), payload);
+    }
+
+    void connectionLimitedServerKeepsDownloadingSteadily() {
+        // Like a speed-test server that allows two connections per client: the extra ones
+        // are turned away with 429. The download must settle on what the server allows and
+        // keep going, not stall in ever longer back-offs.
+        const QByteArray payload = randomPayload(24 * 1024 * 1024 + 11);
+        server_->setBehaviour({.payload = payload, .bytesPerTick = 128 * 1024, .maxConcurrentGets = 2});
+        QTemporaryDir dir;
+        Recorder rec;
+        HttpDownloader dl(rec.reporter());
+        QElapsedTimer timer;
+        timer.start();
+        dl.start(1, request(dir));
+        QVERIFY(rec.waitForState(1, DownloadState::Completed, 60s));
+        QCOMPARE(readFile(rec.path(1)), payload);
+        // Two connections at 12.8 MB/s each need about one second; allow plenty, but far
+        // less than the 1+2+4+8+16 s of back-offs that stalled it before.
+        QVERIFY2(timer.elapsed() < 8000, qPrintable(QStringLiteral("took %1 ms").arg(timer.elapsed())));
+        QVERIFY2(server_->rejectedGets() <= 12, qPrintable(QStringLiteral("%1 requests were turned away").arg(server_->rejectedGets())));
+    }
+
+    void slowSegmentsAreSplitByteExactly() {
+        // Two of four connections crawl. Once the fast ones finish, rebalancing pulls the
+        // slow segments' ends in while their requests are still running and hands the rest
+        // to helpers. Every byte must still land exactly once.
+        const QByteArray payload = randomPayload(96 * 1024 * 1024 + 4099);
+        server_->setBehaviour({.payload = payload, .bytesPerTick = 256 * 1024, .slowGets = 2});
+        QTemporaryDir dir;
+        Recorder rec;
+        HttpDownloader dl(rec.reporter());
+        dl.start(1, request(dir, "file.bin", 4));
+        QVERIFY(rec.waitForState(1, DownloadState::Completed, 60s));
+        QCOMPARE(readFile(rec.path(1)), payload);
+        QVERIFY2(server_->rangedGetRequests() > 4, "helpers should have taken over part of the slow segments");
+    }
+
+    void checkpointSurvivesACrash() {
+        // Copy the partial file and its checkpoint mid-download, as a crash or power cut
+        // would leave them, then resume from the copies: the result must be byte-exact.
+        const QByteArray payload = randomPayload(12 * 1024 * 1024 + 321);
+        server_->setBehaviour({.payload = payload, .bytesPerTick = 8 * 1024});
+        QTemporaryDir dir;
+        QTemporaryDir crashed;
+        fs::path file;
+        {
+            Recorder rec;
+            HttpDownloader dl(rec.reporter());
+            dl.setCheckpointInterval(300ms);
+            dl.start(1, request(dir, "file.bin", 4));
+            QVERIFY(rec.waitForState(1, DownloadState::Downloading));
+            file = rec.path(1);
+            const fs::path meta = fs::path(file).concat(".orbitresume");
+            QTRY_VERIFY_WITH_TIMEOUT(fs::exists(meta), 10000);
+            QTest::qWait(700);
+            // Checkpoint first, then the file: whatever the checkpoint vouches for is in
+            // the file copy, as on a real disk where it was synced first.
+            try {
+                fs::copy_file(meta, fs::path(crashed.path().toStdString()) / "file.bin.orbitresume");
+                fs::copy_file(file, fs::path(crashed.path().toStdString()) / "file.bin");
+            } catch (const std::exception& e) {
+                QFAIL(e.what());
+            }
+            dl.cancel(1);
+            QVERIFY(rec.waitForState(1, DownloadState::Cancelled));
+        }
+        {
+            // The checkpoint has to vouch for real progress, or this test proves nothing.
+            std::ifstream meta(fs::path(crashed.path().toStdString()) / "file.bin.orbitresume");
+            std::string line;
+            std::uint64_t vouched = 0;
+            while (std::getline(meta, line)) {
+                if (line.rfind("seg=", 0) == 0) vouched += std::stoull(line.substr(line.rfind(',') + 1));
+            }
+            QVERIFY2(vouched > 0, "the checkpoint recorded no progress");
+        }
+        Recorder rec;
+        HttpDownloader dl(rec.reporter());
+        DownloadRequest resumed = request(crashed, "file.bin", 4);
+        resumed.existingFilePath = (fs::path(crashed.path().toStdString()) / "file.bin").string();
+        dl.start(2, resumed);
+        QVERIFY(rec.waitForState(2, DownloadState::Completed, 60s));
+        QCOMPARE(readFile(rec.path(2)), payload);
+    }
+
+    void notEnoughSpaceFailsUpFront() {
+        // The server announces a petabyte: no disk has room, so the download must fail at
+        // once with a clear reason rather than create the file and fail when it's full.
+        server_->setBehaviour({.payload = randomPayload(64 * 1024), .advertisedSize = 1'000'000'000'000'000LL});
+        QTemporaryDir dir;
+        Recorder rec;
+        HttpDownloader dl(rec.reporter());
+        dl.start(1, request(dir));
+        QVERIFY(rec.waitForState(1, DownloadState::Error));
+        QVERIFY2(rec.error(1).find("Not enough free space") != std::string::npos, rec.error(1).c_str());
+        QCOMPARE(server_->getRequests(), 0);
+    }
+
+    void learnedConnectionLimitIsRemembered() {
+        // After a host has turned connections away, the next download from it starts at
+        // the number it allowed instead of being refused all over again.
+        const QByteArray payload = randomPayload(8 * 1024 * 1024);
+        server_->setBehaviour({.payload = payload, .bytesPerTick = 128 * 1024, .maxConcurrentGets = 2});
+        QTemporaryDir dir;
+        Recorder rec;
+        HttpDownloader dl(rec.reporter());
+        dl.start(1, request(dir, "first.bin"));
+        QVERIFY(rec.waitForState(1, DownloadState::Completed, 60s));
+        const int rejectedFirst = server_->rejectedGets();
+        QVERIFY(rejectedFirst > 0);
+        dl.start(2, request(dir, "second.bin"));
+        QVERIFY(rec.waitForState(2, DownloadState::Completed, 60s));
+        QCOMPARE(readFile(rec.path(2)), payload);
+        QVERIFY2(server_->rejectedGets() - rejectedFirst <= 1,
+                 qPrintable(QStringLiteral("second download was refused %1 times").arg(server_->rejectedGets() - rejectedFirst)));
     }
 
     void httpErrorFailsTheDownload() {

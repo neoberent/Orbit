@@ -1,4 +1,11 @@
 #include "utils/FileUtils.hpp"
+
+#if !defined(_WIN32)
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #include "utils/Logger.hpp"
 
 #include <algorithm>
@@ -49,14 +56,34 @@ bool preallocateFile(const fs::path& path, std::uint64_t sizeBytes) {
     ::CloseHandle(handle);
     return ok;
 #else
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file) return false;
-    if (sizeBytes > 0) {
-        file.seekp(static_cast<std::streamoff>(sizeBytes - 1));
-        char zero = 0;
-        file.write(&zero, 1);
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        ORBIT_LOG_ERROR("FileUtils", "Couldn't create \"" + path.string() + "\": " + std::strerror(errno));
+        return false;
     }
-    return static_cast<bool>(file);
+    bool ok = true;
+    if (sizeBytes > 0) {
+        // Reserve the space up front, so another program can't fill the disk while this
+        // download is halfway through. fallocate() does it instantly on ext4, btrfs and
+        // xfs; where a filesystem can't, the file is just sized (sparse) as before.
+        if (::fallocate(fd, 0, 0, static_cast<off_t>(sizeBytes)) != 0) {
+            const int err = errno;
+            if (err == ENOSPC) {
+                ORBIT_LOG_ERROR("FileUtils", "Not enough space to reserve " + std::to_string(sizeBytes) + " bytes for \"" +
+                                                 path.string() + "\"");
+                ok = false;
+            } else {
+                ok = ::ftruncate(fd, static_cast<off_t>(sizeBytes)) == 0;
+                if (!ok) ORBIT_LOG_ERROR("FileUtils", "Couldn't size \"" + path.string() + "\": " + std::strerror(errno));
+            }
+        }
+    }
+    ::close(fd);
+    if (!ok) {
+        std::error_code removeEc;
+        fs::remove(path, removeEc);
+    }
+    return ok;
 #endif
 }
 

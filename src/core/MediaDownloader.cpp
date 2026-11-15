@@ -17,6 +17,12 @@
 #include <QStringList>
 
 #include <filesystem>
+#if defined(__linux__)
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#endif
 #include <optional>
 
 namespace orbit::core {
@@ -77,6 +83,45 @@ QString ytDlpWorkingDirectory() {
 // We're called from a slot connected to the QProcess's own finished() signal, so the
 // process object must not be destroyed synchronously here (its signal emission is
 // still unwinding the call stack) — schedule the actual delete for later instead.
+// Whether the browser has a profile where yt-dlp looks for its cookies. Asking for a
+// browser that isn't there makes yt-dlp fail the whole download, so Orbit then goes
+// without its cookies instead (the setting can outlive the browser).
+bool browserCookieStoreExists(const QString& browser) {
+#if defined(__linux__)
+    const QString home = QDir::homePath();
+    const QString config = qEnvironmentVariable("XDG_CONFIG_HOME", home + QStringLiteral("/.config"));
+    QStringList candidates;
+    if (browser == QLatin1String("firefox")) {
+        candidates << home + QStringLiteral("/.mozilla/firefox") << config + QStringLiteral("/mozilla/firefox")
+                   << home + QStringLiteral("/snap/firefox/common/.mozilla/firefox")
+                   << home + QStringLiteral("/.var/app/org.mozilla.firefox/.mozilla/firefox");
+    } else if (browser == QLatin1String("chrome")) {
+        candidates << config + QStringLiteral("/google-chrome");
+    } else if (browser == QLatin1String("edge")) {
+        candidates << config + QStringLiteral("/microsoft-edge");
+    } else if (browser == QLatin1String("brave")) {
+        candidates << config + QStringLiteral("/BraveSoftware/Brave-Browser");
+    } else {
+        return true;  // A browser this list doesn't know: let yt-dlp decide.
+    }
+    for (const QString& dir : candidates) {
+        if (QFileInfo(dir).isDir()) return true;
+    }
+    return false;
+#else
+    Q_UNUSED(browser)
+    return true;
+#endif
+}
+
+bool isCookieStoreError(const QString& error) {
+    return error.contains(QLatin1String("cookie"), Qt::CaseInsensitive) &&
+           (error.contains(QLatin1String("could not find"), Qt::CaseInsensitive) ||
+            error.contains(QLatin1String("could not copy"), Qt::CaseInsensitive) ||
+            error.contains(QLatin1String("failed to decrypt"), Qt::CaseInsensitive) ||
+            error.contains(QLatin1String("database"), Qt::CaseInsensitive));
+}
+
 void deferDeleteProcess(std::unique_ptr<QProcess>& process) {
     if (process) process.release()->deleteLater();
 }
@@ -148,6 +193,42 @@ void MediaDownloader::setProxy(const ProxySettings& proxy) {
     proxy_ = proxy;
 }
 
+void MediaDownloader::setNetworkInterface(const std::string& interfaceName) {
+    std::scoped_lock lock(optionsMutex_);
+    networkInterface_ = interfaceName;
+}
+
+QString MediaDownloader::sourceAddress() const {
+    std::string name;
+    {
+        std::scoped_lock lock(optionsMutex_);
+        name = networkInterface_;
+    }
+    if (name.empty()) return {};
+#if defined(__linux__)
+    ifaddrs* list = nullptr;
+    if (::getifaddrs(&list) != 0) return QStringLiteral("!");
+    QString ipv6;
+    QString ipv4;
+    for (const ifaddrs* entry = list; entry; entry = entry->ifa_next) {
+        if (!entry->ifa_addr || name != entry->ifa_name || !(entry->ifa_flags & IFF_UP)) continue;
+        char text[INET6_ADDRSTRLEN] = {};
+        if (entry->ifa_addr->sa_family == AF_INET && ipv4.isEmpty()) {
+            const auto* address = reinterpret_cast<const sockaddr_in*>(entry->ifa_addr);
+            if (::inet_ntop(AF_INET, &address->sin_addr, text, sizeof(text))) ipv4 = QString::fromLatin1(text);
+        } else if (entry->ifa_addr->sa_family == AF_INET6 && ipv6.isEmpty()) {
+            const auto* address = reinterpret_cast<const sockaddr_in6*>(entry->ifa_addr);
+            if (IN6_IS_ADDR_LINKLOCAL(&address->sin6_addr)) continue;
+            if (::inet_ntop(AF_INET6, &address->sin6_addr, text, sizeof(text))) ipv6 = QString::fromLatin1(text);
+        }
+    }
+    ::freeifaddrs(list);
+    if (!ipv4.isEmpty()) return ipv4;
+    if (!ipv6.isEmpty()) return ipv6;
+#endif
+    return QStringLiteral("!");
+}
+
 void MediaDownloader::setCookiesFromBrowser(const QString& browser) {
     std::scoped_lock lock(optionsMutex_);
     cookiesFromBrowser_ = browser.trimmed().toLower();
@@ -173,7 +254,7 @@ void MediaDownloader::removeCookieFile(const QString& path) {
     if (!path.isEmpty()) QFile::remove(path);
 }
 
-QStringList MediaDownloader::commonArguments(DownloadId, const DownloadRequest& request) const {
+QStringList MediaDownloader::commonArguments(DownloadId id, const DownloadRequest& request) const {
     // Without --encoding, yt-dlp prints file names in the console code page and silently
     // drops characters it can't represent, so the reported path wouldn't match the file.
     QStringList args{QStringLiteral("--encoding"), QStringLiteral("utf-8")};
@@ -185,8 +266,23 @@ QStringList MediaDownloader::commonArguments(DownloadId, const DownloadRequest& 
         browser = cookiesFromBrowser_;
     }
     if (proxy.enabled()) args << QStringLiteral("--proxy") << QString::fromStdString(proxy.url(true));
+    const QString source = sourceAddress();
+    if (!source.isEmpty() && source != QLatin1String("!")) args << QStringLiteral("--source-address") << source;
     // Cookies captured from the browser session win over reading a browser's cookie store.
-    if (request.cookies.empty() && !browser.isEmpty()) args << QStringLiteral("--cookies-from-browser") << browser;
+    bool skipBrowser = false;
+    if (id != 0) {
+        std::scoped_lock lock(jobsMutex_);
+        const auto it = jobs_.find(id);
+        skipBrowser = it != jobs_.end() && it->second->withoutBrowserCookies;
+    }
+    if (request.cookies.empty() && !browser.isEmpty() && !skipBrowser) {
+        if (browserCookieStoreExists(browser)) {
+            args << QStringLiteral("--cookies-from-browser") << browser;
+        } else {
+            ORBIT_LOG_WARN("MediaDownloader", "No " + browser.toStdString() +
+                                                  " profile found; downloading without its cookies (Settings > Media)");
+        }
+    }
     if (!request.userAgent.empty()) args << QStringLiteral("--user-agent") << QString::fromStdString(request.userAgent);
     if (!request.referrer.empty()) args << QStringLiteral("--referer") << QString::fromStdString(request.referrer);
     return args;
@@ -198,6 +294,12 @@ void MediaDownloader::fetchInfo(const QString& url, const std::vector<HttpCookie
     if (ytDlpPath.isEmpty()) {
         MediaInfo info;
         info.error = QStringLiteral("yt-dlp was not found next to Orbit or on PATH");
+        done(info);
+        return;
+    }
+    if (sourceAddress() == QLatin1String("!")) {
+        MediaInfo info;
+        info.error = QStringLiteral("The network interface Orbit is bound to isn't connected");
         done(info);
         return;
     }
@@ -308,6 +410,12 @@ void MediaDownloader::launchProcess(DownloadId id) {
         return;
     }
 
+    if (sourceAddress() == QLatin1String("!")) {
+        reporter_.reportError(id, "The network interface Orbit is bound to isn't connected (Settings > Connection).");
+        reporter_.reportStateChanged(id, DownloadState::Error);
+        return;
+    }
+
     utils::ensureDirectoryExists(job.request.destinationDir);
 
     // '%' is yt-dlp's template marker, so a folder named like "%(id)s" is doubled to stay literal.
@@ -330,6 +438,15 @@ void MediaDownloader::launchProcess(DownloadId id) {
     const QString ffmpegDir = resolveFfmpegPath();
     if (!ffmpegDir.isEmpty()) {
         args << QStringLiteral("--ffmpeg-location") << ffmpegDir;
+        // A small preview for the download list, kept in Orbit's data folder rather than
+        // next to the video. It comes through the same proxy and interface as the video;
+        // ffmpeg turns it into a JPEG every Qt build can show.
+        const QString thumbs = QString::fromStdWString((utils::appDataDir() / "thumbnails").wstring());
+        QDir().mkpath(thumbs);
+        args << QStringLiteral("--write-thumbnail") << QStringLiteral("--convert-thumbnails") << QStringLiteral("jpg")
+             << QStringLiteral("-o")
+             << QStringLiteral("thumbnail:") + QString(thumbs).replace(u'%', QStringLiteral("%%")) +
+                    QStringLiteral("/%1.%(ext)s").arg(id);
     }
 
     if (job.request.mediaAudioOnly) {
@@ -542,6 +659,22 @@ void MediaDownloader::onProcessFinished(DownloadId id, int exitCode, QProcess::E
         const QStringList lines = error.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
         if (!lines.isEmpty()) error = lines.last();
         if (error.isEmpty()) error = QStringLiteral("yt-dlp exited with code %1").arg(exitCode);
+        bool usedBrowserCookies = false;
+        {
+            std::scoped_lock lock(optionsMutex_);
+            usedBrowserCookies = !cookiesFromBrowser_.isEmpty() && job.request.cookies.empty();
+        }
+        if (usedBrowserCookies && !job.withoutBrowserCookies && isCookieStoreError(error)) {
+            // The browser's cookies couldn't be read (locked, encrypted, gone). Most videos
+            // don't need them, so try once more without instead of failing outright.
+            ORBIT_LOG_WARN("MediaDownloader", "Task " + std::to_string(id) + ": couldn't read the browser's cookies (" +
+                                                  error.toStdString() + "); retrying without them");
+            job.withoutBrowserCookies = true;
+            job.stderrTail.clear();
+            deferDeleteProcess(job.process);
+            QMetaObject::invokeMethod(this, [this, id] { launchProcess(id); }, Qt::QueuedConnection);
+            return;
+        }
         ORBIT_LOG_ERROR("MediaDownloader", "Task " + std::to_string(id) + " failed: " + error.toStdString());
         reporter_.reportError(id, error.toStdString());
         reporter_.reportStateChanged(id, DownloadState::Error);

@@ -32,7 +32,17 @@ enum class DownloadState {
 
 [[nodiscard]] const char* toString(DownloadType type) noexcept;
 
+// One connection's share of a segmented download: the byte range it covers and how much
+// of it has arrived (from start). Lets the interface draw each connection's progress.
+struct SegmentProgress {
+    std::uint64_t start{0};
+    std::uint64_t end{0};
+    std::uint64_t done{0};
+};
+
 struct DownloadStats {
+    // Empty unless the download is split across several connections.
+    std::vector<SegmentProgress> segments{};
     std::uint64_t bytesDownloaded{0};
     std::uint64_t bytesUploaded{0};
     std::uint64_t totalBytes{0};

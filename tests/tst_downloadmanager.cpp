@@ -109,6 +109,28 @@ private slots:
         QVERIFY(waitUntil([&] { return m->snapshot(id)->checksumState == ChecksumState::Mismatch; }));
     }
 
+    void serverPublishedDigestIsVerified() {
+        // The server states the file's SHA-256 in Repr-Digest (RFC 9530): the finished
+        // download is checked against it without the user entering anything.
+        const QByteArray payload = randomPayload(3 * 1024 * 1024 + 5);
+        const QByteArray digest = QCryptographicHash::hash(payload, QCryptographicHash::Sha256).toBase64();
+        server_->setBehaviour({.payload = payload, .extraHeaders = "Repr-Digest: sha-256=:" + digest + ":"});
+        auto m = makeManager();
+        const DownloadId id = m->addHttpDownload(request("published.bin"));
+        QVERIFY(waitUntil([&] { return m->snapshot(id)->checksumState == ChecksumState::Match; }));
+        QCOMPARE(readFile(downloadPath("published.bin")), payload);
+    }
+
+    void wrongServerDigestFlagsTheFile() {
+        // A file that doesn't match what the server published is flagged, not silently kept.
+        const QByteArray payload = randomPayload(256 * 1024);
+        const QByteArray wrong = QCryptographicHash::hash("something else", QCryptographicHash::Sha256).toBase64();
+        server_->setBehaviour({.payload = payload, .extraHeaders = "Digest: SHA-256=" + wrong});
+        auto m = makeManager();
+        const DownloadId id = m->addHttpDownload(request("mismatch.bin"));
+        QVERIFY(waitUntil([&] { return m->snapshot(id)->checksumState == ChecksumState::Mismatch; }));
+    }
+
     void existingFileIsKeptAndTheNewOneRenamed() {
         const QByteArray payload = randomPayload(100 * 1024);
         server_->setBehaviour({.payload = payload});

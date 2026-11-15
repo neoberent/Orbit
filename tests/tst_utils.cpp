@@ -1,3 +1,4 @@
+#include "core/InterfaceDns.hpp"
 #include "core/MediaDownloader.hpp"
 #include "core/ProtocolHandler.hpp"
 #include "utils/FileUtils.hpp"
@@ -39,6 +40,62 @@ private slots:
     // QCoreApplication adopts the system locale, and formatBytes() follows its decimal
     // separator; the expectations below are written for the C locale.
     void initTestCase() { std::setlocale(LC_NUMERIC, "C"); }
+
+    void dnsQueryAndAnswer() {
+        using orbit::core::InterfaceDns;
+        const std::string query = InterfaceDns::buildQuery("dl.example.org", 1);
+        // Header (12) + 2dl 7example 3org 0 + type + class.
+        QCOMPARE(query.size(), size_t(12 + 16 + 4));
+        QCOMPARE(query.substr(12, 3), std::string("\x02" "dl"));
+
+        // An answer: the question echoed, a CNAME, an A and an AAAA record, the last two
+        // with compressed names.
+        std::string answer("\x00\x00\x81\x80\x00\x01\x00\x03\x00\x00\x00\x00", 12);
+        answer += query.substr(12);
+        auto record = [&](const std::string& type, const std::string& ttl, const std::string& data) {
+            answer += std::string("\xC0\x0C", 2) + type + std::string("\x00\x01", 2) + ttl;
+            answer.push_back(static_cast<char>(data.size() >> 8));
+            answer.push_back(static_cast<char>(data.size() & 0xFF));
+            answer += data;
+        };
+        record(std::string("\x00\x05", 2), std::string("\x00\x00\x00\x3C", 4), std::string("\x03" "cdn\xC0\x0F", 6));
+        record(std::string("\x00\x01", 2), std::string("\x00\x00\x01\x2C", 4), std::string("\xC0\x00\x02\x0A", 4));
+        record(std::string("\x00\x1C", 2), std::string("\x00\x00\x0E\x10", 4),
+               std::string("\x20\x01\x0d\xb8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01", 16));
+        int ttl = 0;
+        const auto addresses = InterfaceDns::parseAnswer(answer, ttl);
+        QCOMPARE(addresses.size(), size_t(2));
+        QCOMPARE(addresses[0], std::string("192.0.2.10"));
+        QCOMPARE(addresses[1], std::string("2001:db8:0:0:0:0:0:1"));
+        QCOMPARE(ttl, 300);  // the shortest address record's
+
+        // A failed lookup (NXDOMAIN) and a truncated answer give nothing.
+        std::string nx = answer;
+        nx[3] = '\x83';
+        QVERIFY(InterfaceDns::parseAnswer(nx, ttl).empty());
+        QVERIFY(InterfaceDns::parseAnswer(answer.substr(0, 20), ttl).empty());
+    }
+
+    void dnsUrlParts() {
+        using orbit::core::InterfaceDns;
+        QCOMPARE(InterfaceDns::hostOf("https://user:pw@Files.Example.org:8443/a?b#c"), std::string("files.example.org"));
+        QCOMPARE(InterfaceDns::hostOf("http://[2001:db8::1]:8080/x"), std::string("2001:db8::1"));
+        QCOMPARE(InterfaceDns::portOf("https://files.example.org/a"), 443);
+        QCOMPARE(InterfaceDns::portOf("http://files.example.org/a"), 80);
+        QCOMPARE(InterfaceDns::portOf("http://[2001:db8::1]:8080/x"), 8080);
+        QVERIFY(InterfaceDns::isIpLiteral("10.0.0.1"));
+        QVERIFY(InterfaceDns::isIpLiteral("2001:db8::1"));
+        QVERIFY(!InterfaceDns::isIpLiteral("example.org"));
+    }
+
+    void dnsThroughAnUnusableInterfaceFindsNothing() {
+        // Bound to loopback, the resolvers can't be reached: the answer must be "nothing",
+        // never a fall back to the system resolver.
+        using orbit::core::InterfaceDns;
+        InterfaceDns::clearCache();
+        QVERIFY(InterfaceDns::resolve("example.org", "lo").empty());
+        QCOMPARE(InterfaceDns::resolve("127.0.0.1", "lo"), std::vector<std::string>{"127.0.0.1"});
+    }
 
     void trimAndSplit() {
         QCOMPARE(trim("  a b \t\n"), std::string("a b"));

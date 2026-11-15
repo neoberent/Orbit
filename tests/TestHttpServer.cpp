@@ -83,14 +83,22 @@ private:
             return;
         }
 
+        if (!isHead && b.maxConcurrentGets > 0 && owner_.concurrentGets_.load() >= b.maxConcurrentGets) {
+            ++owner_.rejectedGets_;
+            socket->write("HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            socket->disconnectFromHost();
+            return;
+        }
+
         QByteArray headers = ranged ? "HTTP/1.1 206 Partial Content\r\n" : "HTTP/1.1 200 OK\r\n";
         headers += "Content-Type: application/octet-stream\r\n";
-        headers += "Content-Length: " + QByteArray::number(last - first + 1) + "\r\n";
+        headers += "Content-Length: " + QByteArray::number(isHead && b.advertisedSize > 0 ? b.advertisedSize : last - first + 1) + "\r\n";
         if (ranged) {
             headers += "Content-Range: bytes " + QByteArray::number(first) + "-" + QByteArray::number(last) + "/" +
                        QByteArray::number(total) + "\r\n";
         }
         if (b.ranges) headers += "Accept-Ranges: bytes\r\n";
+        if (!b.extraHeaders.isEmpty()) headers += b.extraHeaders + "\r\n";
         if (!b.fileName.isEmpty()) headers += "Content-Disposition: attachment; filename=\"" + b.fileName.toUtf8() + "\"\r\n";
         headers += "Connection: close\r\n\r\n";
         socket->write(headers);
@@ -121,7 +129,8 @@ private:
         auto offset = std::make_shared<qint64>(0);
         auto* timer = new QTimer(socket);
         timer->setInterval(10);
-        connect(timer, &QTimer::timeout, socket, [socket, timer, body, offset, step = b.bytesPerTick] {
+        const int step = getNumber <= b.slowGets ? std::max(1, b.bytesPerTick / 8) : b.bytesPerTick;
+        connect(timer, &QTimer::timeout, socket, [socket, timer, body, offset, step] {
             if (socket->state() != QAbstractSocket::ConnectedState) {
                 timer->stop();
                 return;

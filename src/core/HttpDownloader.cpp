@@ -1,4 +1,5 @@
 #include "core/HttpDownloader.hpp"
+#include "core/InterfaceDns.hpp"
 
 #include "utils/FileUtils.hpp"
 #include "utils/Logger.hpp"
@@ -12,12 +13,16 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <limits>
 #include <mutex>
 #include <system_error>
 
 #if defined(_WIN32)
 #include <share.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 namespace orbit::core {
@@ -26,11 +31,15 @@ namespace {
 
 constexpr std::uint64_t kUnknownSize = std::numeric_limits<std::uint64_t>::max();
 constexpr std::uint64_t kMinSegmentSize = 1024ull * 1024ull;
-// Bound on a single curl request within a range-capable segment. Requesting in
-// bounded chunks (instead of one open-ended request per segment) is what lets a
-// donor segment's tail be handed to a fresh helper segment between chunks, without
-// ever touching a request that's already in flight.
-constexpr std::uint64_t kRebalanceChunkBytes = 8ull * 1024ull * 1024ull;
+// How far ahead of a connection's write position a rebalancing split must land; twice
+// this is the smallest remaining range worth splitting. Small, so that near the end idle
+// connections still take over part of the slowest one's work instead of sitting idle
+// while it finishes alone (each connection stops exactly at its moved end, so a short
+// lead is safe).
+constexpr std::uint64_t kRebalanceChunkBytes = 2ull * 1024ull * 1024ull;
+// A split is abandoned unless the donor is still at least this far from it once the new
+// end is in place; one write from curl is at most 16 KB, so it can never cross it.
+constexpr std::uint64_t kSplitSafetyBytes = 1ull * 1024ull * 1024ull;
 
 // Transient failures (throttling, 5xx, dropped connections) are retried per segment with
 // exponential backoff before the whole download is marked as failed.
@@ -77,11 +86,19 @@ struct WriteContext {
     bool statusChecked{false};
     std::atomic<bool>* rangeIgnored{nullptr};
 
+    // For a segment's request: where the next byte goes, and the segment's end, which
+    // rebalancing may pull in while the request runs. Data past it is left for the helper
+    // segment that took over, and the request ends there (reachedEnd).
+    std::atomic<std::uint64_t>* segmentEnd{nullptr};
+    std::uint64_t position{0};
+    bool reachedEnd{false};
+
     // Called before each request.
     void arm() {
         lastData = std::chrono::steady_clock::now();
         stalled = false;
         statusChecked = false;
+        reachedEnd = false;
     }
 };
 
@@ -105,8 +122,23 @@ size_t curlWriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
         }
         ctx->rangeBytesLeft -= total;
     }
-    const size_t written = std::fwrite(ptr, 1, total, ctx->file);
+    size_t accepted = total;
+    if (ctx->segmentEnd) {
+        const std::uint64_t end = ctx->segmentEnd->load();
+        if (ctx->position > end) {
+            ctx->reachedEnd = true;
+            return 0;
+        }
+        const std::uint64_t allowed = end - ctx->position + 1;
+        if (accepted > allowed) {
+            accepted = static_cast<size_t>(allowed);
+            ctx->reachedEnd = true;
+        }
+    }
+    const size_t written = std::fwrite(ptr, 1, accepted, ctx->file);
+    ctx->position += written;
     ctx->counter->fetch_add(written, std::memory_order_relaxed);
+    if (ctx->reachedEnd) return 0;  // Ends the request; the rest belongs to another segment.
     if (ctx->jobLimiter) ctx->jobLimiter->consume(written, ctx->paused, ctx->cancelled);
     if (ctx->globalLimiter) ctx->globalLimiter->consume(written, ctx->paused, ctx->cancelled);
     // Stamped after the speed caps let go: time spent held back by a cap is never a stall.
@@ -133,6 +165,17 @@ int curlProgressCallback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl
 
 // A request this downloader aborted because it stalled is retried like a dropped
 // connection; any other abort is a pause or cancel.
+// Set when curl was about to ask the system resolver while downloads are locked to an
+// interface; the lookup is refused so the name never leaves over the normal connection.
+struct ResolverGuard {
+    bool blocked{false};
+};
+
+int refuseSystemResolver(void*, void*, void* clientp) {
+    static_cast<ResolverGuard*>(clientp)->blocked = true;
+    return 1;
+}
+
 CURLcode stallAsTimeout(CURLcode res, const WriteContext& ctx) {
     return res == CURLE_ABORTED_BY_CALLBACK && ctx.stalled ? CURLE_OPERATION_TIMEDOUT : res;
 }
@@ -154,7 +197,67 @@ struct ProbeContext {
     bool supportsRanges{false};
     std::string contentDispositionFilename;
     std::uint64_t contentRangeTotal{0};
+    // A digest of the whole file from Repr-Digest / Digest / x-goog-hash, as
+    // "sha512:<hex>", "sha256:<hex>" or "md5:<hex>" (the strongest one offered).
+    std::string checksum;
+    int checksumStrength{0};
 };
+
+std::string base64ToHex(std::string_view text) {
+    static const std::string kAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string bytes;
+    unsigned buffer = 0;
+    int bits = 0;
+    for (char c : text) {
+        if (c == '=') break;
+        if (c == '-') c = '+';
+        if (c == '_') c = '/';
+        const auto value = kAlphabet.find(c);
+        if (value == std::string::npos) return {};
+        buffer = (buffer << 6) | static_cast<unsigned>(value);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            bytes.push_back(static_cast<char>((buffer >> bits) & 0xFF));
+        }
+    }
+    static const char* const kHex = "0123456789abcdef";
+    std::string hex;
+    for (unsigned char b : bytes) {
+        hex.push_back(kHex[b >> 4]);
+        hex.push_back(kHex[b & 0x0F]);
+    }
+    return hex;
+}
+
+// "sha-256=:BASE64:, sha-512=:...:" (RFC 9530) or "SHA-256=BASE64" (RFC 3230), or Google's
+// "crc32c=..., md5=BASE64". Keeps the strongest digest it can read.
+void readDigestHeader(std::string_view value, ProbeContext& ctx) {
+    size_t start = 0;
+    while (start < value.size()) {
+        size_t end = value.find(',', start);
+        if (end == std::string_view::npos) end = value.size();
+        std::string item(utils::trim(value.substr(start, end - start)));
+        start = end + 1;
+        const auto eq = item.find('=');
+        if (eq == std::string::npos) continue;
+        std::string algorithm = item.substr(0, eq);
+        std::transform(algorithm.begin(), algorithm.end(), algorithm.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::string encoded = item.substr(eq + 1);
+        encoded.erase(std::remove(encoded.begin(), encoded.end(), ':'), encoded.end());
+        int strength = 0;
+        std::string name;
+        if (algorithm == "sha-512") { strength = 3; name = "sha512"; }
+        else if (algorithm == "sha-256") { strength = 2; name = "sha256"; }
+        else if (algorithm == "md5") { strength = 1; name = "md5"; }
+        if (strength <= ctx.checksumStrength) continue;
+        const std::string hex = base64ToHex(encoded);
+        const size_t expected = strength == 3 ? 128 : strength == 2 ? 64 : 32;
+        if (hex.size() != expected) continue;
+        ctx.checksum = name + ":" + hex;
+        ctx.checksumStrength = strength;
+    }
+}
 
 std::string extractContentDispositionFilename(std::string_view line) {
     const auto starPos = line.find("filename*=");
@@ -209,6 +312,20 @@ size_t probeHeaderCallback(char* buffer, size_t size, size_t nitems, void* userd
     if (utils::startsWith(line, "Content-Disposition") || utils::startsWith(line, "content-disposition")) {
         std::string name = extractContentDispositionFilename(line);
         if (!name.empty()) ctx->contentDispositionFilename = std::move(name);
+    }
+    {
+        std::string lower(line.substr(0, std::min<size_t>(line.size(), 16)));
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        // A redirect's headers describe something else: only the last response counts.
+        if (utils::startsWith(lower, "http/")) {
+            ctx->checksum.clear();
+            ctx->checksumStrength = 0;
+        }
+        // Content-Digest is left out on purpose: it covers just this response's bytes,
+        // which for a range answer is only part of the file.
+        for (const char* header : {"repr-digest:", "digest:", "x-goog-hash:"}) {
+            if (utils::startsWith(lower, header)) readDigestHeader(line.substr(std::strlen(header)), *ctx);
+        }
     }
     return total;
 }
@@ -409,6 +526,182 @@ void HttpDownloader::setProxy(const ProxySettings& proxy) {
     proxy_ = proxy;
 }
 
+void HttpDownloader::setNetworkInterface(const std::string& interfaceName) {
+    std::scoped_lock lock(proxyMutex_);
+    networkInterface_ = interfaceName;
+}
+
+namespace {
+// "host:port" of a URL (lower-case), or empty.
+std::string hostKey(const std::string& url) {
+    const auto scheme = url.find("://");
+    if (scheme == std::string::npos) return {};
+    std::string rest = url.substr(scheme + 3);
+    rest = rest.substr(0, rest.find_first_of("/?#"));
+    if (const auto at = rest.rfind('@'); at != std::string::npos) rest = rest.substr(at + 1);
+    std::transform(rest.begin(), rest.end(), rest.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return rest;
+}
+// How long a learned limit is trusted before Orbit tries the full count again.
+constexpr auto kHostLimitMemory = std::chrono::minutes(30);
+}
+
+int HttpDownloader::connectionsFor(const std::string& source, int wanted) const {
+    wanted = std::clamp(wanted, 1, 16);
+    const std::string host = hostKey(source);
+    std::scoped_lock lock(hostLimitsMutex_);
+    const auto it = hostLimits_.find(host);
+    if (host.empty() || it == hostLimits_.end()) return wanted;
+    if (std::chrono::steady_clock::now() - it->second.second > kHostLimitMemory) return wanted;
+    return std::min(wanted, it->second.first);
+}
+
+void HttpDownloader::rememberHostLimit(const std::string& source, int connections) {
+    const std::string host = hostKey(source);
+    if (host.empty()) return;
+    std::scoped_lock lock(hostLimitsMutex_);
+    auto& entry = hostLimits_[host];
+    const bool fresh = entry.first == 0 || std::chrono::steady_clock::now() - entry.second > kHostLimitMemory;
+    entry.first = fresh ? connections : std::min(entry.first, connections);
+    entry.second = std::chrono::steady_clock::now();
+}
+
+std::string HttpDownloader::fetchPublishedChecksum(const DownloadRequest& request, const std::string& fileName) const {
+    const std::string& url = request.source;
+    // Signed or generated links (anything with a query) don't have files beside them.
+    if (url.find_first_of("?#") != std::string::npos || fileName.empty()) return {};
+    static const char* const kReleaseTypes[] = {".iso", ".img", ".zip", ".7z", ".tar", ".gz", ".xz", ".zst", ".bz2",
+                                                ".appimage", ".deb", ".rpm", ".exe", ".msi", ".dmg", ".pkg", ".apk"};
+    std::string lowerName = fileName;
+    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const bool release = std::any_of(std::begin(kReleaseTypes), std::end(kReleaseTypes), [&](const char* ext) {
+        return lowerName.size() > std::strlen(ext) && lowerName.compare(lowerName.size() - std::strlen(ext), std::string::npos, ext) == 0;
+    });
+    if (!release) return {};
+
+    for (const char* suffix : {".sha256", ".sha512", ".sha256sum"}) {
+        CURL* curl = curl_easy_init();
+        if (!curl) return {};
+        std::string body;
+        const std::string sidecar = url + suffix;
+        applyRequestOptions(curl, request);
+        curl_easy_setopt(curl, CURLOPT_URL, sidecar.c_str());
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](char* data, size_t size, size_t count, void* userdata) -> size_t {
+            auto* out = static_cast<std::string*>(userdata);
+            if (out->size() + size * count > 16 * 1024) return 0;  // a checksum file is tiny
+            out->append(data, size * count);
+            return size * count;
+        });
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+        const auto result = static_cast<CURLcode>(perform(curl, sidecar));
+        long status = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+        curl_easy_cleanup(curl);
+        if (result != CURLE_OK || status != 200) continue;
+
+        // "<hex>", "<hex>  name" or "<hex> *name" per line; a line naming another file
+        // doesn't count.
+        std::istringstream lines(body);
+        std::string line;
+        while (std::getline(lines, line)) {
+            std::istringstream words(line);
+            std::string hex;
+            std::string name;
+            words >> hex >> name;
+            if (!name.empty() && name.front() == '*') name.erase(0, 1);
+            if (!name.empty()) name = name.substr(name.find_last_of('/') + 1);
+            if (!name.empty() && name != fileName) continue;
+            if ((hex.size() == 64 || hex.size() == 128) &&
+                std::all_of(hex.begin(), hex.end(), [](unsigned char c) { return std::isxdigit(c) != 0; })) {
+                ORBIT_LOG_INFO("HttpDownloader", "Found a published checksum at " + sidecar);
+                return (hex.size() == 64 ? "sha256:" : "sha512:") + hex;
+            }
+        }
+    }
+    return {};
+}
+
+int HttpDownloader::perform(void* handle, const std::string& url) const {
+    CURL* curl = static_cast<CURL*>(handle);
+    std::string interfaceName;
+    std::string proxyUrl;
+    {
+        std::scoped_lock lock(proxyMutex_);
+        interfaceName = networkInterface_;
+        if (proxy_.enabled()) proxyUrl = proxy_.url();
+    }
+    if (interfaceName.empty()) return curl_easy_perform(curl);
+
+    ResolverGuard guard;
+    curl_easy_setopt(curl, CURLOPT_RESOLVER_START_FUNCTION, refuseSystemResolver);
+    curl_easy_setopt(curl, CURLOPT_RESOLVER_START_DATA, &guard);
+
+    // host -> ports curl may connect to it on.
+    std::vector<std::pair<std::string, int>> targets{{InterfaceDns::hostOf(url), InterfaceDns::portOf(url)}};
+    if (!proxyUrl.empty()) targets.emplace_back(InterfaceDns::hostOf(proxyUrl), InterfaceDns::portOf(proxyUrl));
+
+    CURLcode result = CURLE_COULDNT_RESOLVE_HOST;
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        curl_slist* entries = nullptr;
+        bool resolved = true;
+        for (const auto& [host, port] : targets) {
+            // IP addresses go in too: curl runs them past its resolver as well, which
+            // is refused here, so it has to find them already "looked up".
+            if (host.empty()) continue;
+            const std::vector<std::string> addresses = InterfaceDns::resolve(host, interfaceName);
+            if (addresses.empty()) {
+                resolved = false;
+                break;
+            }
+            std::string list;
+            for (const std::string& address : addresses) {
+                if (!list.empty()) list += ',';
+                list += address.find(':') != std::string::npos ? "[" + address + "]" : address;
+            }
+            // Redirects keep the host but may switch between http and https.
+            const std::string name = host.find(':') != std::string::npos ? "[" + host + "]" : host;
+            for (const int p : {port, 80, 443}) {
+                entries = curl_slist_append(entries, (name + ":" + std::to_string(p) + ":" + list).c_str());
+            }
+        }
+        if (!resolved) {
+            curl_slist_free_all(entries);
+            result = CURLE_COULDNT_RESOLVE_HOST;
+            break;
+        }
+        curl_easy_setopt(curl, CURLOPT_RESOLVE, entries);
+        guard.blocked = false;
+        result = curl_easy_perform(curl);
+        curl_easy_setopt(curl, CURLOPT_RESOLVE, nullptr);
+        curl_slist_free_all(entries);
+        if (!guard.blocked) break;
+
+        // A redirect led to a host not looked up yet: look it up and go again.
+        char* effective = nullptr;
+        curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &effective);
+        const std::string next = effective ? effective : "";
+        const std::string nextHost = InterfaceDns::hostOf(next);
+        const bool known = std::any_of(targets.begin(), targets.end(), [&](const auto& t) { return t.first == nextHost; });
+        if (nextHost.empty() || known) {
+            result = CURLE_COULDNT_RESOLVE_HOST;
+            break;
+        }
+        targets.emplace_back(nextHost, InterfaceDns::portOf(next));
+        result = CURLE_COULDNT_RESOLVE_HOST;
+    }
+    curl_easy_setopt(curl, CURLOPT_RESOLVER_START_FUNCTION, nullptr);
+    curl_easy_setopt(curl, CURLOPT_RESOLVER_START_DATA, nullptr);
+    return result;
+}
+
+void HttpDownloader::setCheckpointInterval(std::chrono::milliseconds interval) {
+    checkpointIntervalMs_ = std::max<long>(100, static_cast<long>(interval.count()));
+}
+
 void HttpDownloader::setStallTimeout(std::chrono::seconds timeout) {
     stallTimeoutSeconds_ = std::max<long>(1, static_cast<long>(timeout.count()));
 }
@@ -418,7 +711,10 @@ std::string HttpDownloader::netscapeCookieLine(const HttpCookie& cookie) { retur
 void HttpDownloader::applyRequestOptions(void* handle, const DownloadRequest& request) const {
     CURL* curl = static_cast<CURL*>(handle);
     applyCommonSslOptions(curl);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, request.userAgent.empty() ? "Orbit/1.0" : request.userAgent.c_str());
+    // Without the browser's own, Orbit names itself with a link, as sites like Wikimedia
+    // require of programs (a bare name gets 429 Too Many Requests there).
+    static const std::string kUserAgent = std::string("Orbit/") + ORBIT_VERSION + " (+https://github.com/neoberent/Orbit)";
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, request.userAgent.empty() ? kUserAgent.c_str() : request.userAgent.c_str());
     if (!request.referrer.empty()) curl_easy_setopt(curl, CURLOPT_REFERER, request.referrer.c_str());
     // Handing cookies to curl's cookie engine (rather than a raw Cookie header) keeps
     // each one scoped to its own domain, so a redirect to a CDN can't leak them.
@@ -428,9 +724,17 @@ void HttpDownloader::applyRequestOptions(void* handle, const DownloadRequest& re
     }
 
     ProxySettings proxy;
+    std::string networkInterface;
     {
         std::scoped_lock lock(proxyMutex_);
         proxy = proxy_;
+        networkInterface = networkInterface_;
+    }
+    if (!networkInterface.empty()) {
+        // "if!" binds to the interface by name and fails instead of falling back to
+        // another route while it's down: the kill switch behaviour VPN users expect.
+        const std::string binding = "if!" + networkInterface;
+        curl_easy_setopt(curl, CURLOPT_INTERFACE, binding.c_str());
     }
     if (proxy.enabled()) {
         const std::string url = proxy.url();
@@ -511,7 +815,7 @@ RemoteProbe HttpDownloader::probe(const DownloadRequest& request) const {
             curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abortOnFlagCallback);
             curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &abort);
             long httpCode = 0;
-            if (curl_easy_perform(curl) == CURLE_OK) {
+            if (static_cast<CURLcode>(perform(curl, request.source)) == CURLE_OK) {
                 curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
                 result.supportsRanges = httpCode == 206;
             }
@@ -556,7 +860,7 @@ bool HttpDownloader::rewriteResumeSource(const std::filesystem::path& metaPath, 
 
 bool HttpDownloader::probeRemote(const DownloadRequest& request, std::uint64_t& outSize,
                                  bool& outSupportsRanges, std::string& outFileName,
-                                 std::string& outError, const Job* job) const {
+                                 std::string& outError, const Job* job, std::string* outChecksum) const {
     const std::string& url = request.source;
     CURL* curl = curl_easy_init();
     if (!curl) {
@@ -582,7 +886,7 @@ bool HttpDownloader::probeRemote(const DownloadRequest& request, std::uint64_t& 
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abortOnFlagCallback);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &abort);
 
-    CURLcode res = curl_easy_perform(curl);
+    CURLcode res = static_cast<CURLcode>(perform(curl, url));
     long httpCode = 0;
     curl_off_t contentLength = -1;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
@@ -599,7 +903,7 @@ bool HttpDownloader::probeRemote(const DownloadRequest& request, std::uint64_t& 
         curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
         curl_easy_setopt(curl, CURLOPT_RANGE, "0-0");
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, discardWriteCallback);
-        res = curl_easy_perform(curl);
+        res = static_cast<CURLcode>(perform(curl, url));
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
         if (res == CURLE_OK && (httpCode == 206 || httpCode == 200)) {
             // Servers that reject HEAD still report the full size here: in Content-Range
@@ -622,6 +926,7 @@ bool HttpDownloader::probeRemote(const DownloadRequest& request, std::uint64_t& 
     if (!ok) {
         outError = (res != CURLE_OK) ? curl_easy_strerror(res) : ("HTTP " + std::to_string(httpCode));
     }
+    if (ok && outChecksum) *outChecksum = ctx.checksum;
 
     curl_easy_cleanup(curl);
     return ok;
@@ -665,7 +970,12 @@ void HttpDownloader::runSupervisor(DownloadId id) {
         bool supportsRanges = false;
         std::string fileName;
         std::string probeError;
-        const bool probeOk = probeRemote(job.request, remoteSize, supportsRanges, fileName, probeError, &job);
+        std::string serverChecksum;
+        const bool probeOk = probeRemote(job.request, remoteSize, supportsRanges, fileName, probeError, &job, &serverChecksum);
+        if (probeOk && job.request.expectedChecksum.empty()) {
+            if (serverChecksum.empty()) serverChecksum = fetchPublishedChecksum(job.request, fileName);
+            if (!serverChecksum.empty()) reporter_.reportChecksumFound(id, serverChecksum);
+        }
 
         if (!probeOk && !job.paused.load() && !job.cancelStart.load()) {
             ORBIT_LOG_WARN("HttpDownloader", "Probe failed for " + job.request.source + ": " + probeError);
@@ -737,6 +1047,21 @@ void HttpDownloader::runSupervisor(DownloadId id) {
             job.totalBytes = remoteSize;
             job.supportsRanges = probeOk && supportsRanges && remoteSize > 0 && !job.rangesUnreliable;
 
+            // Better to say so now than to fail at 90% with a full disk.
+            if (job.totalBytes > 0) {
+                std::error_code spaceEc;
+                const auto space = std::filesystem::space(job.filePath.parent_path(), spaceEc);
+                constexpr std::uint64_t kHeadroom = 64ull * 1024 * 1024;
+                if (!spaceEc && space.available < job.totalBytes + kHeadroom) {
+                    job.running = false;
+                    reporter_.reportError(id, "Not enough free space in " + job.filePath.parent_path().string() + ": needs " +
+                                                  utils::formatBytes(job.totalBytes) + ", " +
+                                                  utils::formatBytes(space.available) + " free");
+                    reporter_.reportStateChanged(id, DownloadState::Error);
+                    return;
+                }
+            }
+
             if (!utils::preallocateFile(job.filePath, job.totalBytes)) {
                 job.running = false;
                 reporter_.reportError(id, "Could not create destination file: " + job.filePath.string());
@@ -745,7 +1070,7 @@ void HttpDownloader::runSupervisor(DownloadId id) {
             }
 
             if (job.supportsRanges) {
-                job.desiredConnections = std::clamp(job.request.maxConnections, 1, 16);
+                job.desiredConnections = connectionsFor(job.request.source, job.request.maxConnections);
                 int segCount = job.desiredConnections;
                 if (job.totalBytes / static_cast<std::uint64_t>(segCount) < kMinSegmentSize) {
                     segCount = static_cast<int>(std::max<std::uint64_t>(1, job.totalBytes / kMinSegmentSize));
@@ -773,11 +1098,16 @@ void HttpDownloader::runSupervisor(DownloadId id) {
             // metadata, so re-derive the same target connection count the original
             // request asked for (rebalancing then behaves the same whether a download
             // is fresh or resumed).
-            job.desiredConnections = job.supportsRanges ? std::clamp(job.request.maxConnections, 1, 16) : 1;
+            job.desiredConnections = job.supportsRanges ? connectionsFor(job.request.source, job.request.maxConnections) : 1;
         }
 
         job.startTime = std::chrono::steady_clock::now();
         job.lastSampleTime = job.startTime;
+    }
+    {
+        // A resume measures its speed afresh, not across the time it was paused.
+        std::scoped_lock lock(job.statsMutex);
+        job.rateWindow.clear();
     }
 
     reporter_.reportStateChanged(id, DownloadState::Downloading);
@@ -812,11 +1142,18 @@ void HttpDownloader::runSupervisor(DownloadId id) {
     };
     startPendingSegments();
 
+    auto lastCheckpoint = std::chrono::steady_clock::now();
     while (true) {
         std::this_thread::sleep_for(std::chrono::milliseconds(400));
         sampleAndReportProgress(job);
         startPendingSegments();
         rebalanceSegments(job);
+        // A regular checkpoint, so a crash or power cut costs seconds, not the download.
+        if (job.supportsRanges && job.totalBytes > 0 &&
+            std::chrono::steady_clock::now() - lastCheckpoint > std::chrono::milliseconds(checkpointIntervalMs_.load())) {
+            saveResumeMetadata(job, true);
+            lastCheckpoint = std::chrono::steady_clock::now();
+        }
 
         const bool allFinished = std::all_of(job.segments.begin(), job.segments.end(),
                                               [](const auto& s) { return s->finished.load(); });
@@ -877,7 +1214,17 @@ void HttpDownloader::runSupervisor(DownloadId id) {
             std::scoped_lock lock(job.statsMutex);
             message = job.lastErrorMessage;
         }
-        saveResumeMetadata(job);
+        std::uint64_t receivedSoFar = 0;
+        for (const auto& seg : job.segments) receivedSoFar += seg->bytesDownloaded.load();
+        if (receivedSoFar == 0) {
+            // Nothing arrived: there's nothing to resume, so don't leave an empty (or
+            // space-reserving) file behind that a retry would have to name around.
+            std::error_code removeEc;
+            std::filesystem::remove(job.filePath, removeEc);
+            std::filesystem::remove(job.metaPath, removeEc);
+        } else {
+            saveResumeMetadata(job);
+        }
         job.running = false;
         reporter_.reportError(id, message.empty() ? "Download failed" : message);
         reporter_.reportStateChanged(id, DownloadState::Error);
@@ -972,20 +1319,49 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
         if (!isTransientFailure(failure, httpCode) || retries >= kMaxSegmentRetries) return false;
         ++retries;
-        if (httpCode == 429 || httpCode == 503) {
-            // The server is throttling parallel connections: shrink this job's target so
-            // rebalancing stops adding helpers, instead of hammering it harder.
+        const bool tooMany = httpCode == 429 || httpCode == 503;
+        if (tooMany) {
+            // The server is limiting parallel connections: lower this job's target. The
+            // request gate then keeps the job at what the server accepts, and rebalancing
+            // stops adding helpers.
             int current = job.desiredConnections.load();
             while (current > 1 && !job.desiredConnections.compare_exchange_weak(current, current - 1)) {
             }
+            rememberHostLimit(job.request.source, std::max(1, current - 1));
         }
-        const auto backoff = std::chrono::milliseconds(std::min(30000, 1000 << (retries - 1)));
+        // Turned away for being one connection too many: the gate already makes this
+        // segment wait for a free slot, so a short pause is enough. Real failures back off
+        // exponentially.
+        const auto backoff = tooMany && job.desiredConnections.load() > 1
+                                 ? std::chrono::milliseconds(250 * retries)
+                                 : std::chrono::milliseconds(std::min(30000, 1000 << (retries - 1)));
         const auto until = std::chrono::steady_clock::now() + backoff;
         while (std::chrono::steady_clock::now() < until) {
             if (job.paused.load() || job.cancelStart.load()) return false;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         return !job.paused.load() && !job.cancelStart.load();
+    };
+
+    // Takes one of the job's request slots, waiting while the server's connection limit
+    // is in use. False when the job is paused or cancelled meanwhile.
+    auto acquireSlot = [&] {
+        while (true) {
+            if (job.paused.load() || job.cancelStart.load()) return false;
+            int inFlight = job.requestsInFlight.load();
+            if (inFlight < std::max(1, job.desiredConnections.load()) &&
+                job.requestsInFlight.compare_exchange_weak(inFlight, inFlight + 1)) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    };
+    auto performGated = [&](WriteContext& ctx) {
+        if (!acquireSlot()) return CURLE_ABORTED_BY_CALLBACK;
+        ctx.arm();
+        const CURLcode result = stallAsTimeout(static_cast<CURLcode>(perform(curl, job.request.source)), ctx);
+        --job.requestsInFlight;
+        return result;
     };
 
     if (!ranged) {
@@ -1004,8 +1380,7 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
         curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
         while (true) {
-            ctx.arm();
-            res = stallAsTimeout(curl_easy_perform(curl), ctx);
+            res = performGated(ctx);
             if (res == CURLE_OK || res == CURLE_ABORTED_BY_CALLBACK) break;
             if (!shouldRetry(res)) break;
             segment.bytesDownloaded = 0;
@@ -1018,17 +1393,17 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
         if (res == CURLE_OK) segment.success = true;
         else if (res != CURLE_ABORTED_BY_CALLBACK) sawRealError = true;
     } else {
-        // Repeatedly request a bounded sub-range instead of the segment's whole span
-        // in one request. This is what lets rebalanceSegments shrink endOffset
-        // cleanly between chunks - a donor's in-flight request (bounded to
-        // kRebalanceChunkBytes) is never touched by a shrink, since the split point
-        // is always chosen at least one full chunk ahead of it.
+        // One request for the segment's whole remaining range. Servers that limit how many
+        // requests a client sends (speed-test and CDN hosts answer 429) see one request
+        // per connection instead of one every few megabytes. When rebalancing pulls the
+        // segment's end in, the write callback stops at the new end and the request ends;
+        // a dropped connection simply asks again from where it got to.
         while (true) {
             const std::uint64_t currentEnd = segment.endOffset.load();
             const std::uint64_t resumeOffset = segment.startOffset + segment.bytesDownloaded.load();
             if (resumeOffset > currentEnd) break;  // shrunk out from under us - nothing left for this segment
 
-            const std::uint64_t chunkEnd = std::min(currentEnd, resumeOffset + kRebalanceChunkBytes - 1);
+            const std::uint64_t chunkEnd = currentEnd;
 
 #if defined(_WIN32)
             _fseeki64(fp, static_cast<long long>(resumeOffset), SEEK_SET);
@@ -1040,15 +1415,19 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
             ctx.curl = curl;
             ctx.rangeBytesLeft = chunkEnd - resumeOffset + 1;
             ctx.rangeIgnored = &job.rangeIgnored;
+            ctx.segmentEnd = &segment.endOffset;
+            ctx.position = resumeOffset;
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
             curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
 
             const std::string rangeHeader = std::to_string(resumeOffset) + "-" + std::to_string(chunkEnd);
             curl_easy_setopt(curl, CURLOPT_RANGE, rangeHeader.c_str());
 
-            ctx.arm();
-            res = stallAsTimeout(curl_easy_perform(curl), ctx);
+            res = performGated(ctx);
             if (job.rangeIgnored.load()) break;  // the supervisor starts over in one piece
+            // Stopped at an end that rebalancing moved: this segment's part is complete
+            // (or, if the split was taken back, the loop asks for the rest).
+            if (ctx.reachedEnd) res = CURLE_OK;
             if (res != CURLE_OK) {
                 if (res == CURLE_ABORTED_BY_CALLBACK) break;
                 if (shouldRetry(res)) continue;
@@ -1107,13 +1486,19 @@ void HttpDownloader::rebalanceSegments(Job& job) {
 
     const std::uint64_t pos = donor->startOffset + donor->bytesDownloaded.load();
     const std::uint64_t oldEnd = donor->endOffset.load();
-    // Split past the donor's currently in-flight chunk (bounded to
-    // kRebalanceChunkBytes) so the shrink below can never race a write to the same
-    // byte range from both the donor and the new helper.
+    // Split well ahead of where the donor is writing, so its request (which stops at the
+    // new end) and the new helper never write the same bytes.
     const std::uint64_t splitPoint = pos + kRebalanceChunkBytes + (donorRemaining - kRebalanceChunkBytes) / 2;
     if (splitPoint >= oldEnd) return;
 
     donor->endOffset.store(splitPoint - 1);
+    // The donor kept writing while this was worked out. If it got close to the split,
+    // take the split back: nothing past the old position has been handed to anyone yet.
+    const std::uint64_t posAfter = donor->startOffset + donor->bytesDownloaded.load();
+    if (posAfter + kSplitSafetyBytes > splitPoint) {
+        donor->endOffset.store(oldEnd);
+        return;
+    }
 
     auto helper = std::make_unique<Segment>();
     helper->startOffset = splitPoint;
@@ -1135,15 +1520,20 @@ void HttpDownloader::sampleAndReportProgress(Job& job) {
     double rate;
     {
         std::scoped_lock lock(job.statsMutex);
-        const double elapsed = std::chrono::duration<double>(now - job.lastSampleTime).count();
+        // Speed over the last ~2 s (or since the start, if sooner).
+        constexpr auto kWindow = std::chrono::milliseconds(2000);
+        auto& window = job.rateWindow;
+        if (!window.empty() && downloaded < window.back().second) window.clear();  // restarted from 0
+        window.emplace_back(now, downloaded);
+        while (window.size() > 2 && now - window[1].first >= kWindow) window.pop_front();
+        const double elapsed = std::chrono::duration<double>(now - window.front().first).count();
         if (elapsed > 0.05) {
-            const std::uint64_t delta = downloaded > job.bytesAtLastSample ? downloaded - job.bytesAtLastSample : 0;
-            rate = static_cast<double>(delta) / elapsed;
-            job.bytesAtLastSample = downloaded;
-            job.lastSampleTime = now;
+            rate = static_cast<double>(downloaded - window.front().second) / elapsed;
         } else {
             rate = job.lastStats.downloadRateBytesPerSec;
         }
+        job.bytesAtLastSample = downloaded;
+        job.lastSampleTime = now;
     }
 
     DownloadStats stats;
@@ -1151,6 +1541,19 @@ void HttpDownloader::sampleAndReportProgress(Job& job) {
     stats.totalBytes = job.totalBytes;
     stats.downloadRateBytesPerSec = rate;
     stats.activeConnections = std::min(active, job.activeSegments.load());
+    if (job.segments.size() > 1 && job.totalBytes > 0) {
+        // Rebalancing can split segments many times over; past this many the bar would
+        // be noise, so it falls back to plain progress.
+        constexpr size_t kMaxReportedSegments = 64;
+        if (job.segments.size() <= kMaxReportedSegments) {
+            stats.segments.reserve(job.segments.size());
+            for (auto& seg : job.segments) {
+                const std::uint64_t end = seg->endOffset.load();
+                const std::uint64_t length = end >= seg->startOffset ? end - seg->startOffset + 1 : 0;
+                stats.segments.push_back({seg->startOffset, end, std::min(seg->bytesDownloaded.load(), length)});
+            }
+        }
+    }
     if (rate > 1.0 && job.totalBytes > downloaded) {
         stats.eta = std::chrono::seconds(
             static_cast<std::int64_t>(static_cast<double>(job.totalBytes - downloaded) / rate));
@@ -1163,15 +1566,41 @@ void HttpDownloader::sampleAndReportProgress(Job& job) {
     reporter_.reportProgress(job.id, stats);
 }
 
-void HttpDownloader::saveResumeMetadata(Job& job) const {
-    std::ofstream out(job.metaPath, std::ios::trunc);
-    if (!out) return;
-    out << "source=" << job.request.source << "\n";
-    out << "totalBytes=" << job.totalBytes << "\n";
-    out << "supportsRanges=" << (job.supportsRanges ? 1 : 0) << "\n";
+void HttpDownloader::saveResumeMetadata(Job& job, bool whileRunning) const {
+    // Bytes a running segment may still hold in its stdio buffer: well over one buffer.
+    constexpr std::uint64_t kUnflushedMargin = 512 * 1024;
+    std::string text = "source=" + job.request.source + "\n" + "totalBytes=" + std::to_string(job.totalBytes) + "\n" +
+                       "supportsRanges=" + (job.supportsRanges ? "1" : "0") + "\n";
     for (const auto& seg : job.segments) {
-        out << "seg=" << seg->startOffset << "," << seg->endOffset << "," << seg->bytesDownloaded.load() << "\n";
+        std::uint64_t done = seg->bytesDownloaded.load();
+        if (whileRunning && !seg->finished.load()) done = done > kUnflushedMargin ? done - kUnflushedMargin : 0;
+        text += "seg=" + std::to_string(seg->startOffset) + "," + std::to_string(seg->endOffset.load()) + "," +
+                std::to_string(done) + "\n";
     }
+#if !defined(_WIN32)
+    if (whileRunning) {
+        // The data the checkpoint vouches for has to be on disk before the checkpoint is.
+        const int fd = ::open(job.filePath.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            ::fsync(fd);
+            ::close(fd);
+        }
+    }
+#endif
+    // Written beside and then renamed over the old one, so a crash mid-write never
+    // leaves a half-written file that would lose the download's progress.
+    std::filesystem::path temp = job.metaPath;
+    temp += ".tmp";
+    {
+        std::ofstream out(temp, std::ios::trunc | std::ios::binary);
+        if (!out) return;
+        out << text;
+        out.flush();
+        if (!out) return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(temp, job.metaPath, ec);
+    if (ec) std::filesystem::remove(temp, ec);
 }
 
 bool HttpDownloader::loadResumeMetadata(Job& job) const {

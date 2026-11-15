@@ -57,7 +57,9 @@ std::string formatBytes(std::uint64_t bytes) {
     if (unitIndex == 0) {
         std::snprintf(buf, sizeof(buf), "%llu %s", static_cast<unsigned long long>(bytes), units[unitIndex]);
     } else {
-        std::snprintf(buf, sizeof(buf), "%.2f %s", value, units[unitIndex]);
+        // Three significant digits: 1.84 MB, 24.0 MB, 256 KB.
+        const char* format = value < 10.0 ? "%.2f %s" : value < 100.0 ? "%.1f %s" : "%.0f %s";
+        std::snprintf(buf, sizeof(buf), format, value, units[unitIndex]);
     }
     return std::string(buf);
 }

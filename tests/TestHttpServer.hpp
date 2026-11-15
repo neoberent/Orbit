@@ -36,6 +36,16 @@ public:
         // silent with the connection left open, like a server that died mid-transfer.
         int stallGets{0};
         int stallAfterBytes{0};
+        // Answers GETs beyond this many at once with 429 Too Many Requests, like a server
+        // that limits connections per client (0 = no limit).
+        int maxConcurrentGets{0};
+        // The first `slowGets` GET requests send at an eighth of bytesPerTick, so their
+        // segments lag behind and get split by rebalancing.
+        int slowGets{0};
+        // Extra header lines sent with every answer (e.g. "Repr-Digest: sha-256=:...:").
+        QByteArray extraHeaders;
+        // Size HEAD claims instead of the payload's (0 = the real size).
+        qint64 advertisedSize{0};
         // Sent as Content-Disposition when set.
         QString fileName;
     };
@@ -55,6 +65,7 @@ public:
     [[nodiscard]] int rangedGetRequests() const noexcept { return rangedGetRequests_.load(); }
     [[nodiscard]] int peakConcurrentGets() const noexcept { return peakConcurrentGets_.load(); }
     [[nodiscard]] int openConnections() const noexcept { return openConnections_.load(); }
+    [[nodiscard]] int rejectedGets() const noexcept { return rejectedGets_.load(); }
 
 private:
     friend class TestHttpServerWorker;
@@ -68,6 +79,7 @@ private:
     std::atomic<int> concurrentGets_{0};
     std::atomic<int> peakConcurrentGets_{0};
     std::atomic<int> openConnections_{0};
+    std::atomic<int> rejectedGets_{0};
 
     QThread* thread_{nullptr};
 };

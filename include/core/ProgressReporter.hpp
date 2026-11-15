@@ -22,6 +22,8 @@ using NoticeCallback = std::function<void(DownloadId, bool ok, const std::string
 // A download stopped before writing anything because its file already exists and the
 // user asked to be consulted (FileConflictAction::Ask).
 using FileConflictCallback = std::function<void(DownloadId, const std::string& existingPath)>;
+// A checksum the server published for the file ("sha256:<hex>"), to verify it against.
+using ChecksumFoundCallback = std::function<void(DownloadId, const std::string& checksum)>;
 
 struct ProgressReporter {
     ProgressCallback onProgress;
@@ -30,6 +32,7 @@ struct ProgressReporter {
     NameResolvedCallback onNameResolved;
     NoticeCallback onNotice;
     FileConflictCallback onFileConflict;
+    ChecksumFoundCallback onChecksumFound;
 
     void reportProgress(DownloadId id, const DownloadStats& stats) const {
         if (onProgress) onProgress(id, stats);
@@ -45,6 +48,9 @@ struct ProgressReporter {
     }
     void reportFileConflict(DownloadId id, const std::string& existingPath) const {
         if (onFileConflict) onFileConflict(id, existingPath);
+    }
+    void reportChecksumFound(DownloadId id, const std::string& checksum) const {
+        if (onChecksumFound) onChecksumFound(id, checksum);
     }
     void reportNotice(DownloadId id, bool ok, const std::string& message) const {
         if (onNotice) onNotice(id, ok, message);
