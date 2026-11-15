@@ -16,8 +16,12 @@ release=$(cd "$here/../../.." && pwd)/Orbitwebsite/src/config/release.js
 js_value() {
     sed -n "s/^const $1 = '\([^']*\)'.*/\1/p" "$release" | head -n 1
 }
-app_version=$(js_value version)
-app_tag=$(js_value installerTag)
+# The AUR package is the Linux build, which can be ahead of Windows (linuxVersion/linuxTag);
+# release.js files from before that split only have version/installerTag.
+app_version=$(js_value linuxVersion)
+app_tag=$(js_value linuxTag)
+[ -n "$app_version" ] && [ "$app_version" != "version" ] || app_version=$(js_value version)
+[ -n "$app_tag" ] && [ "$app_tag" != "installerTag" ] || app_tag=$(js_value installerTag)
 ext_version=$(js_value extensionVersion)
 ext_tag=$(js_value extensionTag)
 for v in app_version app_tag ext_version ext_tag; do

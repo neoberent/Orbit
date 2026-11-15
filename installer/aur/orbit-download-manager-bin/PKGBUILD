@@ -4,9 +4,9 @@
 # installer/aur/update-aur.sh bumps pkgver, _tag and the checksum for each release.
 
 pkgname=orbit-download-manager-bin
-pkgver=3.1.5
+pkgver=3.2.0
 pkgrel=1
-_tag=Release3.1.5
+_tag=Release3.2.0
 pkgdesc='Multi-connection HTTP, BitTorrent and video download manager (Qt 6)'
 arch=('x86_64')
 url='https://github.com/neoberent/Orbit'
@@ -37,7 +37,7 @@ conflicts=('orbit-download-manager' 'orbit' 'orbit-bin')
 install=orbit-download-manager.install
 options=('!strip' '!debug')
 source=("https://github.com/neoberent/Orbit-release/releases/download/$_tag/OrbitSetup-$pkgver-linux.tar.gz")
-sha256sums=('2bfd85dcfd1fcd0aa6c387cdb5656c49f4fbee6ce974e55f3ca9c84e2b840ebd')
+sha256sums=('9a0ca608796fc9fde4013653efa4e09b4075d6b2371088595f2812257d78344a')
 
 package() {
     cd "orbit-$pkgver-linux-$CARCH"
