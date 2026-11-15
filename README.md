@@ -97,6 +97,20 @@ The code is split into two static libraries and the GUI:
 - **Headless mode**: `orbit --headless` runs without any window or tray (no display needed),
   controlled by the command line and the web dashboard; `orbit.service` runs it as a systemd
   user service. `orbit --background` starts the normal app in the tray.
+- **Finding and adding**: Ctrl+K opens a command palette (commands, settings pages, any
+  download by name, or a pasted link); several links pasted at once open Add Many Links,
+  which checks each one first (name, size, already downloaded?). Mirrors (other links to the
+  same file) each serve some of the connections; a mirror with a different file is ignored.
+- **After downloading**: files can go to a folder per type (Videos, Music, Archives, ...),
+  archives can be unpacked beside themselves (bsdtar; entries leaving the folder are refused),
+  and a command can run for each finished file (no shell; never restored from a backup).
+  Finished files can be dragged out of the list; videos and torrents can be played while
+  they download (mpv, VLC or Celluloid).
+- **Torrent feeds**: RSS/Atom feeds checked every 30 minutes; new items matching a filter
+  (words, -exclusions or /regex/) download by themselves. On btrfs, new torrents' files skip
+  copy-on-write so scattered piece writes don't fragment them.
+- **aria2-compatible interface** (off by default): aria2's JSON-RPC on 127.0.0.1 with a
+  secret token, for add-ons and apps made for aria2.
 - **Clipboard monitoring**: copied magnet links and links to files are offered for download
   from a small prompt by the notification area.
 - **Power**: keeps the PC awake while downloading (Windows power requests; on Linux the
@@ -217,9 +231,10 @@ Everything the Windows build does works on Linux too; the platform pieces live i
 | Segoe UI | Inter, bundled (`src/ui/assets/fonts`, SIL OFL) |
 | Inno Setup installer + in-app update | `installer/linux/build-package.sh` → `OrbitSetup-<v>-linux.tar.gz` with `install.sh`; the in-app updater installs the `linux` entry of `updates.json` |
 
-Under a Wayland session Orbit runs through XWayland, because it positions its own windows
-(the splash, the clipboard prompt by the tray, the restored main window), which Wayland
-doesn't allow; set `QT_QPA_PLATFORM=wayland` to override. Settings live in
+Under a Wayland session Orbit runs natively (no splash screen there, and copied links are
+offered as a notification instead of a prompt by the tray); `ORBIT_X11=1` runs it through
+XWayland instead. `installer/flatpak` holds a Flatpak manifest (io.github.neoberent.Orbit)
+and `installer/appimage/build-appimage.sh` builds an AppImage with linuxdeploy. Settings live in
 `~/.config/Orbit`, data in `~/.local/share/orbit`, and `install.sh` puts the program in
 `~/.local/lib/orbit` (no root needed). `ORBIT_POWER_DRY_RUN=1` logs the when-done power
 actions instead of carrying them out, for testing.
