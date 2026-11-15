@@ -64,6 +64,8 @@ class MainWindow final : public QObject {
     Q_PROPERTY(double seedRatioLimit READ seedRatioLimit WRITE setSeedRatioLimit NOTIFY torrentSettingsChanged)
     Q_PROPERTY(int seedTimeLimitMinutes READ seedTimeLimitMinutes WRITE setSeedTimeLimitMinutes NOTIFY torrentSettingsChanged)
     Q_PROPERTY(bool seedAfterDownload READ seedAfterDownload WRITE setSeedAfterDownload NOTIFY torrentSettingsChanged)
+    Q_PROPERTY(bool noCowOnBtrfs READ noCowOnBtrfs WRITE setNoCowOnBtrfs NOTIFY torrentSettingsChanged)
+    Q_PROPERTY(bool downloadsOnBtrfs READ downloadsOnBtrfs NOTIFY downloadDirectoryChanged)
 
     Q_PROPERTY(QString mediaCookiesBrowser READ mediaCookiesBrowser WRITE setMediaCookiesBrowser NOTIFY mediaSettingsChanged)
 
@@ -191,6 +193,9 @@ public:
     [[nodiscard]] int seedTimeLimitMinutes() const noexcept { return seedTimeLimitMinutes_; }
     [[nodiscard]] bool seedAfterDownload() const noexcept { return seedAfterDownload_; }
     void setSeedAfterDownload(bool seed);
+    [[nodiscard]] bool noCowOnBtrfs() const noexcept { return noCowOnBtrfs_; }
+    void setNoCowOnBtrfs(bool enabled);
+    [[nodiscard]] bool downloadsOnBtrfs() const;
     void setSeedTimeLimitMinutes(int minutes);
 
     [[nodiscard]] QString mediaCookiesBrowser() const { return mediaCookiesBrowser_; }
@@ -219,6 +224,8 @@ public:
     // Without a window nobody can answer a question, so .torrent files open from outside
     // start with every file, and a file name that's taken gets a new name.
     void setHeadless(bool headless);
+    // For the command line's feed commands.
+    void setFeedWatcher(class FeedWatcher* watcher) { feedWatcher_ = watcher; }
 
     [[nodiscard]] QString networkInterface() const { return networkInterface_; }
     void setNetworkInterface(const QString& name);
@@ -376,6 +383,7 @@ private:
     double seedRatioLimit_{0};
     int seedTimeLimitMinutes_{0};
     bool seedAfterDownload_{false};
+    bool noCowOnBtrfs_{true};
 
     QString mediaCookiesBrowser_;
     QString fileConflictAction_{QStringLiteral("ask")};
@@ -388,6 +396,7 @@ private:
     bool browserIntegrationEnabled_{true};
 
     bool headless_{false};
+    class FeedWatcher* feedWatcher_{nullptr};
     void applyTypeFolders();
 
     bool draggingOut_{false};

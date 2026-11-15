@@ -39,6 +39,7 @@ SettingsBrowserTab 1.0 SettingsBrowserTab.qml
 SettingsScheduleTab 1.0 SettingsScheduleTab.qml
 SettingsRemoteTab 1.0 SettingsRemoteTab.qml
 SettingsAboutTab 1.0 SettingsAboutTab.qml
+SettingsFeedsTab 1.0 SettingsFeedsTab.qml
 KeyCap 1.0 KeyCap.qml
 SpeedGraph 1.0 SpeedGraph.qml
 SpeedHistory 1.0 SpeedHistory.qml

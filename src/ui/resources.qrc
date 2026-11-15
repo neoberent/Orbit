@@ -41,6 +41,7 @@
         <file alias="SettingsScheduleTab.qml">qml/SettingsScheduleTab.qml</file>
         <file alias="SettingsRemoteTab.qml">qml/SettingsRemoteTab.qml</file>
         <file alias="SettingsAboutTab.qml">qml/SettingsAboutTab.qml</file>
+        <file alias="SettingsFeedsTab.qml">qml/SettingsFeedsTab.qml</file>
         <file alias="KeyCap.qml">qml/KeyCap.qml</file>
         <file alias="Prefs.qml">qml/Prefs.qml</file>
         <file alias="SpeedGraph.qml">qml/SpeedGraph.qml</file>

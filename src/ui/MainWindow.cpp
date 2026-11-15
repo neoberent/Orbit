@@ -1,6 +1,7 @@
 #include "MainWindow.hpp"
 
 #include "BrowserIntegration.hpp"
+#include "FeedWatcher.hpp"
 #include "core/ProtocolHandler.hpp"
 #include "core/RemoteServer.hpp"
 #include "core/Scheduler.hpp"
@@ -171,6 +172,7 @@ MainWindow::MainWindow(orbit::core::DownloadManager& manager, bool portable, QOb
     seedRatioLimit_ = settings.value("torrent/seedRatioLimit", 0.0).toDouble();
     seedTimeLimitMinutes_ = settings.value("torrent/seedTimeLimitMinutes", 0).toInt();
     seedAfterDownload_ = settings.value("torrent/seedAfterDownload", false).toBool();
+    noCowOnBtrfs_ = settings.value("torrent/noCowOnBtrfs", true).toBool();
     applyTorrentSettings();
 
     mediaCookiesBrowser_ = settings.value("media/cookiesFromBrowser").toString();
@@ -1016,6 +1018,19 @@ QJsonObject MainWindow::handleControlRequest(const QJsonObject& request) {
     if (type == QLatin1String("ping")) {
         return QJsonObject{{"ok", true}, {"version", QCoreApplication::applicationVersion()}};
     }
+    if (type == QLatin1String("feeds") && feedWatcher_) {
+        const QString action = request.value("action").toString();
+        const QString url = request.value("url").toString().trimmed();
+        if (action == QLatin1String("add")) {
+            const QString error = feedWatcher_->addFeed(url, request.value("filter").toString(), request.value("directory").toString());
+            if (!error.isEmpty()) return fail(error);
+        } else if (action == QLatin1String("remove")) {
+            feedWatcher_->removeFeed(url);
+        } else if (action == QLatin1String("check")) {
+            feedWatcher_->checkNow();
+        }
+        return QJsonObject{{"ok", true}, {"feeds", QJsonArray::fromVariantList(feedWatcher_->feeds())}};
+    }
     if (type == QLatin1String("show")) {
         emit showWindowRequested();
         return QJsonObject{{"ok", true}};
@@ -1330,7 +1345,20 @@ void MainWindow::applyProxy() {
 void MainWindow::applyTorrentSettings() {
     manager_.torrentEngine().setSeedingLimits(seedRatioLimit_, seedTimeLimitMinutes_);
     manager_.torrentEngine().setSeedAfterDownload(seedAfterDownload_);
+    manager_.torrentEngine().setNoCowOnBtrfs(noCowOnBtrfs_);
     if (!seedAfterDownload_) manager_.completeFinishedPausedTorrents();
+}
+
+void MainWindow::setNoCowOnBtrfs(bool enabled) {
+    if (enabled == noCowOnBtrfs_) return;
+    noCowOnBtrfs_ = enabled;
+    QSettings().setValue("torrent/noCowOnBtrfs", enabled);
+    applyTorrentSettings();
+    emit torrentSettingsChanged();
+}
+
+bool MainWindow::downloadsOnBtrfs() const {
+    return orbit::core::TorrentEngine::isOnBtrfs(downloadDirectory().toStdString());
 }
 
 void MainWindow::setSeedAfterDownload(bool seed) {

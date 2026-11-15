@@ -108,6 +108,20 @@ ColumnLayout {
         }
     }
 
+    SettingsGroup {
+        visible: appController.downloadsOnBtrfs
+        title: "Disk"
+        SettingsRow {
+            divider: false
+            label: "Avoid fragmentation on btrfs"
+            description: "New torrents' files skip copy-on-write, which scattered piece writes would fragment. Torrents verify every piece themselves."
+            ToggleSwitch {
+                checked: appController.noCowOnBtrfs
+                onToggled: appController.noCowOnBtrfs = checked
+            }
+        }
+    }
+
     Text {
         Layout.fillWidth: true
         text: "Per-torrent limits, sequential download and file priorities are under Download Options and the Files tab in the details pane."

@@ -1,4 +1,5 @@
 #include "core/InterfaceDns.hpp"
+#include "core/TorrentEngine.hpp"
 #include "core/MediaDownloader.hpp"
 #include "core/ProtocolHandler.hpp"
 #include "utils/FileUtils.hpp"
@@ -8,6 +9,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QProcess>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -74,6 +76,21 @@ private slots:
         nx[3] = '\x83';
         QVERIFY(InterfaceDns::parseAnswer(nx, ttl).empty());
         QVERIFY(InterfaceDns::parseAnswer(answer.substr(0, 20), ttl).empty());
+    }
+
+    void noCowOnBtrfs() {
+        // Run in the build folder: /tmp is usually tmpfs, where there's nothing to test.
+        QTemporaryDir dir(QDir::currentPath() + QStringLiteral("/nocow-XXXXXX"));
+        const std::string path = dir.path().toStdString();
+        if (!orbit::core::TorrentEngine::isOnBtrfs(path)) QSKIP("not on btrfs");
+        const std::string file = path + "/piece-data.bin";
+        std::ofstream{file, std::ios::binary};
+        QVERIFY(orbit::core::TorrentEngine::markNoCow(file));
+        QProcess lsattr;
+        lsattr.start(QStringLiteral("lsattr"), {QString::fromStdString(file)});
+        QVERIFY(lsattr.waitForFinished(5000));
+        const QString attributes = QString::fromLocal8Bit(lsattr.readAllStandardOutput()).section(QLatin1Char(' '), 0, 0);
+        QVERIFY2(attributes.contains(QLatin1Char('C')), qPrintable(attributes));
     }
 
     void dnsUrlParts() {

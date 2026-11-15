@@ -49,6 +49,11 @@ const char* const kUsage =
     "  cancel <id>... | --all       Cancel downloads (the partial file is kept)\n"
     "  remove, rm <id>...           Remove finished, paused or failed downloads from the list\n"
     "                               (files on disk are never deleted)\n"
+    "  feeds                        Show your torrent feeds\n"
+    "  feeds add <url> [--filter <words>] [-d <folder>]\n"
+    "                               Follow a feed: new matching items download by themselves\n"
+    "  feeds remove <url>           Stop following a feed\n"
+    "  feeds check                  Check every feed now\n"
     "  show                         Open Orbit's window\n"
     "  help                         Show this help\n"
     "\n"
@@ -207,6 +212,7 @@ int runCommand(const QString& command, const QStringList& args) {
     bool force = false;
     QString directory;
     QString checksum;
+    QString filter;
     QStringList mirrors;
     QStringList positional;
     for (int i = 0; i < args.size(); ++i) {
@@ -231,6 +237,9 @@ int runCommand(const QString& command, const QStringList& args) {
                 if (!line.isEmpty() && !line.startsWith(QLatin1Char('#'))) positional << line;
                 if (positional.size() > 1000) { printError(QStringLiteral("too many links (1000 at most)")); return kExitUsage; }
             }
+        } else if (a == QLatin1String("--filter")) {
+            if (i + 1 >= args.size()) { printError(QStringLiteral("--filter needs words")); return kExitUsage; }
+            filter = args[++i];
         } else if (a == QLatin1String("--mirror")) {
             if (i + 1 >= args.size()) { printError(QStringLiteral("--mirror needs a link")); return kExitUsage; }
             mirrors << args[++i];
@@ -339,6 +348,34 @@ int runCommand(const QString& command, const QStringList& args) {
         }
     } else if (command == QLatin1String("show")) {
         request(QJsonObject{{"type", "show"}});
+    } else if (command == QLatin1String("feeds")) {
+        const QString action = positional.value(0, QStringLiteral("list"));
+        QJsonObject r{{"type", "feeds"}, {"action", action}, {"url", positional.value(1)}, {"filter", filter}};
+        if (!directory.isEmpty()) r.insert("directory", directory);
+        if ((action == QLatin1String("add") || action == QLatin1String("remove")) && positional.size() < 2) {
+            printError(QStringLiteral("feeds %1 needs the feed's address").arg(action));
+            exitCode = kExitUsage;
+        } else if (const auto reply = request(r)) {
+            if (!reply->value("ok").toBool()) {
+                printError(reply->value("error").toString());
+                exitCode = kExitFailed;
+            } else if (json) {
+                printLine(QString::fromUtf8(QJsonDocument(reply->value("feeds").toArray()).toJson(QJsonDocument::Indented)).trimmed());
+            } else {
+                const QJsonArray feeds = reply->value("feeds").toArray();
+                if (feeds.isEmpty()) printLine(QStringLiteral("No feeds."));
+                for (const QJsonValue& v : feeds) {
+                    const QJsonObject f = v.toObject();
+                    printLine(QStringLiteral("%1%2  %3").arg(f.value("enabled").toBool() ? QString() : QStringLiteral("(off) "),
+                                                             f.value("name").toString(), f.value("url").toString()));
+                    QString detail = f.value("filter").toString().isEmpty() ? QStringLiteral("every new item")
+                                                                            : QStringLiteral("filter: ") + f.value("filter").toString();
+                    detail += QStringLiteral(", %1 downloaded").arg(f.value("matched").toInt());
+                    if (!f.value("lastError").toString().isEmpty()) detail += QStringLiteral(", ") + f.value("lastError").toString();
+                    printLine(QStringLiteral("    ") + detail);
+                }
+            }
+        }
     }
     socket->disconnectFromServer();
     delete socket;
@@ -364,6 +401,7 @@ std::optional<int> run(int argc, char* argv[]) {
     static const QStringList commands{
         QStringLiteral("add"), QStringLiteral("list"), QStringLiteral("status"), QStringLiteral("pause"),
         QStringLiteral("resume"), QStringLiteral("cancel"), QStringLiteral("remove"), QStringLiteral("show"),
+        QStringLiteral("feeds"),
     };
     if (!commands.contains(command)) return std::nullopt;
 

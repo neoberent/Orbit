@@ -70,6 +70,16 @@ public:
     // it, using the request's cookies, referrer and user agent. Blocks for up to ~50 s.
     [[nodiscard]] RemoteProbe probe(const DownloadRequest& request) const;
 
+    // Fetches a small document (a feed, a .torrent file) through the same proxy, interface
+    // lock and DNS as downloads. Fails past maxBytes. Blocks; run it in the background.
+    struct Fetched {
+        bool ok{false};
+        long status{0};
+        std::string body;
+        std::string error;
+    };
+    [[nodiscard]] Fetched fetchSmall(const DownloadRequest& request, std::size_t maxBytes) const;
+
     // Points a partial download's .orbitresume sidecar at a new link, so a resume picks
     // up the bytes already on disk instead of starting over. False if there's no sidecar.
     static bool rewriteResumeSource(const std::filesystem::path& metaPath, const std::string& newSource);

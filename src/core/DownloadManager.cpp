@@ -996,6 +996,16 @@ std::string DownloadManager::resolveFileConflict(DownloadId id, FileConflictActi
     return {};
 }
 
+void DownloadManager::fetchSmall(const std::string& url, std::size_t maxBytes,
+                                 std::function<void(bool, const std::string&, const std::string&)> done) {
+    DownloadRequest request;
+    request.source = url;
+    runInBackground([this, request, maxBytes, done = std::move(done)](std::stop_token stop) {
+        const auto result = httpDownloader_->fetchSmall(request, maxBytes);
+        if (!stop.stop_requested()) done(result.ok, result.body, result.error);
+    });
+}
+
 void DownloadManager::inspectLink(const DownloadRequest& request, std::function<void(const RemoteProbe&)> done) {
     runInBackground([this, request, done = std::move(done)](std::stop_token stop) {
         const RemoteProbe result = httpDownloader_->probe(request);

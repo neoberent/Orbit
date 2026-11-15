@@ -7,7 +7,7 @@ _orbit() {
     cmd=${COMP_WORDS[1]}
 
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=($(compgen -W "add list ls status pause resume cancel remove rm show help --background --headless --version" -- "$cur"))
+        COMPREPLY=($(compgen -W "add list ls status pause resume cancel remove rm show feeds help --background --headless --version" -- "$cur"))
         return
     fi
     case $cmd in
@@ -27,6 +27,9 @@ _orbit() {
             local ids
             ids=$(orbit list 2>/dev/null | awk 'NR > 1 && $1 ~ /^[0-9]+$/ {print $1}')
             COMPREPLY=($(compgen -W "$ids --all" -- "$cur"))
+            ;;
+        feeds)
+            COMPREPLY=($(compgen -W "add remove check --filter --dir --json" -- "$cur"))
             ;;
         list|ls|status)
             COMPREPLY=($(compgen -W "--json" -- "$cur"))

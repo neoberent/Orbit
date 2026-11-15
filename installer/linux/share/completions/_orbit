@@ -18,6 +18,7 @@ _orbit() {
         'cancel:Cancel downloads'
         'remove:Remove downloads from the list'
         'show:Open the window'
+        'feeds:Torrent RSS feeds'
         'help:Show help'
     )
     if (( CURRENT == 2 )); then
@@ -36,6 +37,7 @@ _orbit() {
         pause|resume|cancel) _arguments '(-a --all)'{-a,--all}'[every download]' '*:download:_orbit_ids' ;;
         remove|rm) _arguments '*:download:_orbit_ids' ;;
         list|ls|status) _arguments '--json[print JSON]' ;;
+        feeds) _arguments '1:action:(add remove check)' '--filter[words a title must contain]:words:' '(-d --dir)'{-d,--dir}'[save in this folder]:folder:_directories' '--json[print JSON]' ;;
     esac
 }
 

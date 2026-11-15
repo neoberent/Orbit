@@ -168,6 +168,8 @@ qt_add_executable(orbit
     src/ui/ChecksumCalculator.hpp
     src/ui/SystemAppearance.cpp
     src/ui/SystemAppearance.hpp
+    src/ui/FeedWatcher.cpp
+    src/ui/FeedWatcher.hpp
     src/ui/resources.qrc
     $<$<NOT:$<PLATFORM_ID:Windows>>:${CMAKE_CURRENT_SOURCE_DIR}/src/ui/fonts.qrc>
     $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/src/ui/assets/app.rc>

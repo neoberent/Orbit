@@ -25,6 +25,7 @@ Dialog {
         { label: "Media", icon: "media", title: "Media", description: "Sign-in for video sites, and keeping yt-dlp up to date" },
         { label: "Browser", icon: "extension", title: "Browser Integration", description: "Hand downloads from your browser to Orbit" },
         { label: "Schedule", icon: "clock", title: "Schedule", description: "When Orbit may download, and how fast" },
+        { label: "Feeds", icon: "torrent", title: "Feeds", description: "New torrents from RSS feeds, downloaded as they appear" },
         { label: "Remote Access", icon: "globe", title: "Remote Access", description: "Check on downloads from your phone or another computer" },
         { label: "About", icon: "info", title: "About Orbit", description: "Version, updates, backups, and troubleshooting" }
     ]
@@ -64,6 +65,7 @@ Dialog {
         networkTab.load()
         torrentTab.load()
         scheduleTab.load()
+        feedsTab.load()
         remoteTab.load()
         aboutTab.load()
     }
@@ -176,8 +178,9 @@ Dialog {
                     SettingsMediaTab { id: mediaTab; dialog: root; visible: root.currentTab === 4 }
                     SettingsBrowserTab { id: browserTab; dialog: root; visible: root.currentTab === 5 }
                     SettingsScheduleTab { id: scheduleTab; dialog: root; visible: root.currentTab === 6 }
-                    SettingsRemoteTab { id: remoteTab; dialog: root; visible: root.currentTab === 7 }
-                    SettingsAboutTab { id: aboutTab; dialog: root; visible: root.currentTab === 8 }
+                    SettingsFeedsTab { id: feedsTab; dialog: root; visible: root.currentTab === 7 }
+                    SettingsRemoteTab { id: remoteTab; dialog: root; visible: root.currentTab === 8 }
+                    SettingsAboutTab { id: aboutTab; dialog: root; visible: root.currentTab === 9 }
                 }
             }
 

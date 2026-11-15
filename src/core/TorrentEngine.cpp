@@ -1,6 +1,14 @@
 #include "core/TorrentEngine.hpp"
 #include "core/InterfaceDns.hpp"
 
+#if defined(__linux__)
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#include <sys/vfs.h>
+#include <unistd.h>
+#endif
+
 #include "utils/FileUtils.hpp"
 #include "utils/Logger.hpp"
 #include "utils/StringUtils.hpp"
@@ -147,6 +155,7 @@ struct TorrentEngine::Impl {
     double seedRatioLimit{0};
     int seedMinutesLimit{0};
     bool seedAfterDownload{false};
+    bool noCowOnBtrfs{true};
 
     mutable std::mutex mutex;
     std::unordered_map<DownloadId, Entry> entries;
@@ -160,6 +169,7 @@ namespace {
 const char* const kDefaultBootstrapNodes = "dht.libtorrent.org:25401";
 const std::pair<const char*, int> kBootstrapRouters[] = {
     {"dht.libtorrent.org", 25401}, {"router.bittorrent.com", 6881}, {"dht.transmissionbt.com", 6881}};
+void prepareNoCow(const lt::torrent_info& ti, const std::string& savePath);
 }
 
 TorrentEngine::TorrentEngine(ProgressReporter reporter, TorrentEngineSettings settings)
@@ -442,6 +452,13 @@ void TorrentEngine::start(DownloadId id, const DownloadRequest& request) {
         }
     }
 
+    bool noCow = false;
+    {
+        std::scoped_lock lock(impl_->mutex);
+        noCow = impl_->noCowOnBtrfs;
+    }
+    if (noCow && atp.ti) prepareNoCow(*atp.ti, atp.save_path);
+
     lt::error_code ec;
     lt::torrent_handle handle = impl_->session->add_torrent(std::move(atp), ec);
     if (ec || !handle.is_valid()) {
@@ -618,6 +635,68 @@ void TorrentEngine::setNetworkInterface(const std::string& interfaceName) {
     if (!interfaceName.empty()) resolveBootstrapThrough(interfaceName);
     ORBIT_LOG_INFO("torrent", interfaceName.empty() ? std::string("Torrents use any network interface")
                                                     : "Torrents bound to network interface " + interfaceName);
+}
+
+void TorrentEngine::setNoCowOnBtrfs(bool enabled) {
+    std::scoped_lock lock(impl_->mutex);
+    impl_->noCowOnBtrfs = enabled;
+}
+
+bool TorrentEngine::isOnBtrfs(const std::string& path) {
+#if defined(__linux__)
+    struct statfs info {};
+    constexpr long kBtrfsMagic = 0x9123683E;
+    return ::statfs(path.c_str(), &info) == 0 && static_cast<long>(info.f_type) == kBtrfsMagic;
+#else
+    (void)path;
+    return false;
+#endif
+}
+
+bool TorrentEngine::markNoCow(const std::string& path) {
+#if defined(__linux__)
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    int flags = 0;
+    bool ok = ::ioctl(fd, FS_IOC_GETFLAGS, &flags) == 0;
+    if (ok && !(flags & FS_NOCOW_FL)) {
+        flags |= FS_NOCOW_FL;
+        ok = ::ioctl(fd, FS_IOC_SETFLAGS, &flags) == 0;
+    }
+    ::close(fd);
+    return ok;
+#else
+    (void)path;
+    return false;
+#endif
+}
+
+namespace {
+// Prepares where a torrent's data will go: the top folder of a multi-file torrent (files
+// created in it inherit the flag), or the empty file of a single-file one.
+void prepareNoCow(const lt::torrent_info& ti, const std::string& savePath) {
+    if (!TorrentEngine::isOnBtrfs(savePath)) return;
+    const lt::file_storage& files = ti.files();
+    if (files.num_files() <= 0) return;
+    const std::string first = files.file_path(lt::file_index_t{0});
+    const auto slash = first.find_first_of("/\\");
+    std::error_code ec;
+    if (files.num_files() > 1 || slash != std::string::npos) {
+        const std::filesystem::path top = std::filesystem::path(savePath) / first.substr(0, slash);
+        if (std::filesystem::exists(top, ec)) return;  // Files may already be in it.
+        std::filesystem::create_directories(top, ec);
+        if (!ec && TorrentEngine::markNoCow(top.string())) {
+            ORBIT_LOG_INFO("TorrentEngine", "Marked " + top.string() + " no-copy-on-write (btrfs)");
+        }
+    } else {
+        const std::filesystem::path file = std::filesystem::path(savePath) / first;
+        if (std::filesystem::exists(file, ec)) return;  // Only an empty, new file can take the flag.
+        std::ofstream{file, std::ios::binary};
+        if (TorrentEngine::markNoCow(file.string())) {
+            ORBIT_LOG_INFO("TorrentEngine", "Marked " + file.string() + " no-copy-on-write (btrfs)");
+        }
+    }
+}
 }
 
 void TorrentEngine::setSeedAfterDownload(bool seed) {
@@ -875,6 +954,18 @@ void TorrentEngine::alertLoop(std::stop_token stopToken) {
                         std::to_string(impl_->settings.listenPort) + " to this PC in your router.");
             } else if (auto* saved = lt::alert_cast<lt::save_resume_data_alert>(a)) {
                 writeResumeData(saved->handle, saved->params);
+            } else if (auto* meta = lt::alert_cast<lt::metadata_received_alert>(a)) {
+                // A magnet link's file list just arrived; no piece has been written yet.
+                bool noCow = false;
+                {
+                    std::scoped_lock lock(impl_->mutex);
+                    noCow = impl_->noCowOnBtrfs;
+                }
+                if (noCow) {
+                    if (const auto ti = meta->handle.torrent_file()) {
+                        prepareNoCow(*ti, meta->handle.status(lt::torrent_handle::query_save_path).save_path);
+                    }
+                }
             } else if (auto* moved = lt::alert_cast<lt::storage_moved_alert>(a)) {
                 if (const DownloadId movedId = idForHandle(moved->handle)) {
                     const auto ti = moved->handle.torrent_file();

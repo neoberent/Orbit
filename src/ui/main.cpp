@@ -10,6 +10,7 @@
 #include "PowerManager.hpp"
 #include "SplashScreen.hpp"
 #include "SystemAppearance.hpp"
+#include "FeedWatcher.hpp"
 #include "TrayController.hpp"
 #include "UpdateManager.hpp"
 #include "YtDlpUpdater.hpp"
@@ -367,6 +368,11 @@ int main(int argc, char* argv[]) {
     downloadProxyModel.setSourceModel(&downloadModel);
 
     SystemAppearance systemAppearance;
+    FeedWatcher feedWatcher(manager);
+    controller.setFeedWatcher(&feedWatcher);
+    QObject::connect(&feedWatcher, &FeedWatcher::itemAdded, &trayController, [&trayController](const QString& feed, const QString& title) {
+        trayController.notify(QStringLiteral("New from ") + feed, title, false);
+    });
 #if !defined(_WIN32)
     // Lets the window be see-through when the translucent look is on (Settings > General).
     QQuickWindow::setDefaultAlphaBuffer(true);
@@ -381,6 +387,7 @@ int main(int argc, char* argv[]) {
     engine.rootContext()->setContextProperty("ytDlpUpdater", &ytDlpUpdater);
     engine.rootContext()->setContextProperty("powerManager", &powerManager);
     engine.rootContext()->setContextProperty("systemAppearance", &systemAppearance);
+    engine.rootContext()->setContextProperty("feedWatcher", &feedWatcher);
     engine.rootContext()->setContextProperty("clipboardMonitor", clipboardMonitor ? &*clipboardMonitor : nullptr);
 
     QObject::connect(&trayController, &TrayController::quitRequested, &app, &QCoreApplication::quit);

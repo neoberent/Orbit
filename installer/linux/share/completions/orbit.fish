@@ -1,6 +1,6 @@
 # fish completions for orbit (Orbit Download Manager)
 
-set -l commands add list ls status pause resume cancel remove rm show help
+set -l commands add list ls status pause resume cancel remove rm show feeds help
 
 function __orbit_download_ids
     # "ID  STATE ..." rows from `orbit list`; offered as "id<TAB>state  name".
@@ -16,6 +16,9 @@ complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a resume -d 'R
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a cancel -d 'Cancel downloads'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a remove -d 'Remove downloads from the list'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a show -d 'Open the window'
+complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a feeds -d 'Torrent RSS feeds'
+complete -c orbit -n '__fish_seen_subcommand_from feeds' -x -a 'add remove check'
+complete -c orbit -n '__fish_seen_subcommand_from feeds' -l filter -x -d 'Words a title must contain'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a help -d 'Show help'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -l background -d 'Start in the tray'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -l headless -d 'Run without window or tray'

@@ -566,6 +566,43 @@ void HttpDownloader::rememberHostLimit(const std::string& source, int connection
     entry.second = std::chrono::steady_clock::now();
 }
 
+HttpDownloader::Fetched HttpDownloader::fetchSmall(const DownloadRequest& request, std::size_t maxBytes) const {
+    Fetched out;
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        out.error = "Failed to initialize HTTP client";
+        return out;
+    }
+    struct Sink {
+        std::string* body;
+        std::size_t max;
+    } sink{&out.body, maxBytes};
+    applyRequestOptions(curl, request);
+    curl_easy_setopt(curl, CURLOPT_URL, request.source.c_str());
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](char* data, size_t size, size_t count, void* userdata) -> size_t {
+        auto* s = static_cast<Sink*>(userdata);
+        if (s->body->size() + size * count > s->max) return 0;
+        s->body->append(data, size * count);
+        return size * count;
+    });
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
+    const auto result = static_cast<CURLcode>(perform(curl, request.source));
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &out.status);
+    curl_easy_cleanup(curl);
+    out.ok = result == CURLE_OK && out.status >= 200 && out.status < 300;
+    if (!out.ok) {
+        out.error = result == CURLE_WRITE_ERROR ? "Too large" : result != CURLE_OK ? curl_easy_strerror(result)
+                                                                                  : "HTTP " + std::to_string(out.status);
+    }
+    return out;
+}
+
 std::string HttpDownloader::fetchPublishedChecksum(const DownloadRequest& request, const std::string& fileName) const {
     const std::string& url = request.source;
     // Signed or generated links (anything with a query) don't have files beside them.

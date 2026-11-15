@@ -119,6 +119,9 @@ public:
     // Asks the server about a link that isn't a download yet (size, name, ranges), in the
     // background.
     void inspectLink(const DownloadRequest& request, std::function<void(const RemoteProbe&)> done);
+    // HttpDownloader::fetchSmall in the background; done runs on that thread.
+    void fetchSmall(const std::string& url, std::size_t maxBytes,
+                    std::function<void(bool ok, const std::string& body, const std::string& error)> done);
 
     [[nodiscard]] std::vector<TaskRecord> exportRecords() const;
     // Adds tasks from a backup, skipping ones already in the list. Unfinished imports

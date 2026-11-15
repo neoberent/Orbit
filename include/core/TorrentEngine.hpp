@@ -58,6 +58,13 @@ public:
     // Off: a torrent stops as soon as it has finished downloading. On: it keeps sharing
     // until the seeding limits above (if any) are reached.
     void setSeedAfterDownload(bool seed);
+    // On btrfs, marks a torrent's files (or its folder) "no copy-on-write" before
+    // anything is written, so the scattered piece writes don't fragment them badly.
+    // Torrents check every piece's hash themselves, so btrfs's checksums aren't needed.
+    void setNoCowOnBtrfs(bool enabled);
+    // Whether path is on btrfs, and the marking itself (exposed for the tests).
+    static bool isOnBtrfs(const std::string& path);
+    static bool markNoCow(const std::string& path);
 
     [[nodiscard]] std::vector<TorrentFileStatus> files(DownloadId id) const;
     // priority: 0 = skip, 1 = low, 4 = normal, 7 = high.
