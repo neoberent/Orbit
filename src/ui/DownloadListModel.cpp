@@ -194,6 +194,16 @@ QVariant DownloadListModel::data(const QModelIndex& index, int role) const {
                        : -1.0;
         case AddedAtRole: return static_cast<double>(snap.addedAt);
         case AddedTextRole: return addedDateText(snap.addedAt);
+        case AddedSectionRole: {
+            // The heading the list groups this row under when sorted by date added.
+            const QDate added = QDateTime::fromSecsSinceEpoch(snap.addedAt).date();
+            const QDate today = QDate::currentDate();
+            if (added == today) return QStringLiteral("Today");
+            if (added == today.addDays(-1)) return QStringLiteral("Yesterday");
+            if (added > today.addDays(-7)) return QStringLiteral("This week");
+            if (added > today.addDays(-31)) return QStringLiteral("This month");
+            return QStringLiteral("Earlier");
+        }
         case ConnectionsRole: return snap.stats.activeConnections;
         case MaxConnectionsRole: return snap.options.maxConnections;
         case SpeedLimitKBpsRole: return bytesToKbps(snap.options.speedLimitBytesPerSec);
@@ -274,6 +284,7 @@ QHash<int, QByteArray> DownloadListModel::roleNames() const {
         {FileConflictPathRole, "fileConflictPath"},
         {CanRefreshLinkRole, "canRefreshLink"},
         {SegmentsRole, "segments"},
+        {AddedSectionRole, "addedSection"},
         {ThumbnailRole, "thumbnail"},
     };
 }
@@ -289,6 +300,13 @@ qlonglong DownloadListModel::addDownload(const QVariantMap& spec) {
     request.maxConnections = std::clamp(spec.value("connections", 8).toInt(), 1, 32);
     request.speedLimitBytesPerSec = kbpsToBytes(spec.value("speedLimitKBps", 0).toInt());
     request.scheduledStartAt = static_cast<std::int64_t>(spec.value("startAt", 0).toDouble());
+    for (const QVariant& mirror : spec.value("mirrors").toList()) {
+        const QString link = mirror.toString().trimmed();
+        if ((link.startsWith(QLatin1String("http://"), Qt::CaseInsensitive) || link.startsWith(QLatin1String("https://"), Qt::CaseInsensitive)) &&
+            !link.contains(QLatin1Char(' ')) && request.mirrors.size() < 8) {
+            request.mirrors.push_back(link.toStdString());
+        }
+    }
     if (const QString checksum = spec.value("checksum").toString().trimmed(); !checksum.isEmpty()) {
         const auto parsed = orbit::utils::parseChecksum(checksum.toStdString());
         if (parsed) request.expectedChecksum = parsed->toString();
@@ -582,6 +600,22 @@ QVariantMap DownloadListModel::get(qlonglong id) const {
     const auto names = roleNames();
     for (auto it = names.cbegin(); it != names.cend(); ++it) {
         result.insert(QString::fromUtf8(it.value()), data(idx, it.key()));
+    }
+    return result;
+}
+
+QVariantList DownloadListModel::search(const QString& query, int limit) const {
+    const QStringList words = query.toLower().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    QVariantList result;
+    if (words.isEmpty()) return result;
+    for (auto it = items_.rbegin(); it != items_.rend() && result.size() < limit; ++it) {
+        const QString haystack = (QString::fromStdString(it->name) + QLatin1Char(' ') + QString::fromStdString(it->source)).toLower();
+        if (!std::all_of(words.begin(), words.end(), [&](const QString& w) { return haystack.contains(w); })) continue;
+        result.append(QVariantMap{{"taskId", static_cast<qlonglong>(it->id)},
+                                  {"name", QString::fromStdString(it->name)},
+                                  {"stateLabel", QString::fromLatin1(orbit::core::toString(it->state))},
+                                  {"isTorrent", it->type == DownloadType::Torrent},
+                                  {"isMedia", it->type == DownloadType::Media}});
     }
     return result;
 }

@@ -33,6 +33,10 @@ public:
     Q_INVOKABLE void notifyTransfer(qlonglong id, const QString& title, const QString& message, bool success);
     // Downloads were paused because the connection is metered; offers to continue anyway.
     void notifyMetered(int count);
+    // Offers copied links as a notification with Download and Review buttons (used where
+    // Orbit can't place its own prompt by the tray, i.e. under Wayland). False when the
+    // desktop has no notification server with buttons; the caller shows its prompt then.
+    Q_INVOKABLE bool offerLinks(const QStringList& links);
     // Draws a thin ring around the tray icon that fills with the overall progress of what's
     // downloading (0..1), in the accent colour; a negative value removes it.
     Q_INVOKABLE void setProgress(double progress, const QColor& color);
@@ -50,6 +54,8 @@ signals:
     // "open", "reveal" or "retry", picked on a download's notification.
     void downloadActionRequested(qlonglong id, const QString& action);
     void meteredResumeRequested();
+    // "download" or "review", picked on a copied-links notification.
+    void linksActionRequested(const QString& action, const QStringList& links);
 
 private:
     void buildTrayIcon();
@@ -64,5 +70,6 @@ private:
     QIcon baseIcon_;
     int shownProgressStep_{-1};
     QColor shownProgressColor_;
+    QStringList offeredLinks_;
     DesktopNotifications* desktopNotifications_{nullptr};
 };

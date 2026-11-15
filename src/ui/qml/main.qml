@@ -102,6 +102,10 @@ ApplicationWindow {
         target: trayController
         function onPauseAllRequested() { downloadModel.pauseAll() }
         function onResumeAllRequested() { downloadModel.resumeAll() }
+        function onLinksActionRequested(action, links) {
+            if (action === "download") clipboardPrompt.downloadRequested(links)
+            else if (links.length > 0) clipboardPrompt.reviewRequested(links[0])
+        }
         function onDownloadActionRequested(id, action) {
             const item = downloadModel.get(id)
             if (item.taskId === undefined) return
@@ -151,7 +155,12 @@ ApplicationWindow {
 
     Connections {
         target: clipboardMonitor
-        function onLinksDetected(links) { clipboardPrompt.offer(links) }
+        // Under Wayland Orbit can't place its prompt by the tray, so the offer comes as a
+        // notification (when the desktop's notifications have buttons).
+        function onLinksDetected(links) {
+            if (Qt.platform.pluginName.startsWith("wayland") && trayController.offerLinks(links)) return
+            clipboardPrompt.offer(links)
+        }
     }
 
     ClipboardPrompt {
@@ -240,7 +249,55 @@ ApplicationWindow {
     Shortcut { sequence: StandardKey.Find; onActivated: topBar.focusSearch() }
     Shortcut { sequence: StandardKey.New; enabled: !addDialog.visible && !settingsDialog.visible; onActivated: window.openAddDialog() }
 
-    AddDownloadDialog { id: addDialog }
+    Shortcut {
+        sequences: ["Ctrl+K", "Ctrl+Shift+P"]
+        enabled: !palette.opened
+        onActivated: palette.open()
+    }
+
+    CommandPalette {
+        id: palette
+        commandsProvider: function() {
+            const list = [
+                { title: "Add download…", icon: "plus", keywords: "new link url magnet torrent", run: () => window.openAddDialog() },
+                { title: "Add many links…", icon: "link", keywords: "batch multiple list paste", run: () => batchDialog.openWithText("") },
+                { title: "Pause all", icon: "pause", keywords: "stop", run: () => downloadModel.pauseAll() },
+                { title: "Resume all", icon: "play", keywords: "start continue", run: () => downloadModel.resumeAll() },
+                { title: "Clear finished downloads", icon: "sweep", keywords: "remove completed clean", run: () => downloadModel.clearFinished() },
+                { title: "Open download folder", icon: "folder", keywords: "files directory", run: () => Qt.openUrlExternally("file://" + appController.downloadDirectory) },
+                { title: Theme.dark ? "Switch to light theme" : "Switch to dark theme", icon: "sparkle", keywords: "appearance mode colour color",
+                  run: () => Prefs.themeMode = Theme.dark ? "light" : "dark" },
+                { title: "Search downloads", icon: "search", keywords: "find filter", run: () => topBar.focusSearch() }
+            ]
+            const categories = [["all", "All downloads"], ["downloading", "Downloading"], ["completed", "Completed"], ["torrents", "Torrents"], ["media", "Media"]]
+            for (const [key, label] of categories) {
+                list.push({ title: "Show " + label.toLowerCase(), icon: key === "all" ? "all" : (key === "torrents" ? "torrent" : (key === "media" ? "media" : (key === "completed" ? "completed" : "downloading"))),
+                            keywords: "view category " + key, run: () => window.selectedCategory = key })
+            }
+            settingsDialog.pages.forEach((page, index) => list.push({
+                title: "Settings: " + page.title, detail: page.description, icon: page.icon, keywords: "preferences options " + page.label,
+                run: () => { settingsDialog.currentTab = index; settingsDialog.open() } }))
+            return list
+        }
+        onDownloadPicked: (taskId) => {
+            topBar.clearSearch()
+            window.selectedCategory = "all"
+            Qt.callLater(() => table.revealId(taskId))
+        }
+        onAddRequested: (link, review) => {
+            if (review) addDialog.openWithSource(link)
+            else {
+                const added = appController.addLinks([link])
+                toast.show(added === 1 ? "Download added" : "That link couldn't be added", added === 1)
+            }
+        }
+    }
+
+    AddDownloadDialog {
+        id: addDialog
+        onManyLinksPasted: (text) => batchDialog.openWithText(text)
+    }
+    BatchAddDialog { id: batchDialog }
     SettingsPage {
         id: settingsDialog
         onUpdateDialogRequested: updateDialog.open()

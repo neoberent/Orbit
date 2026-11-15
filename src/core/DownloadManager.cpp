@@ -171,7 +171,28 @@ DownloadId DownloadManager::addTask(DownloadType type, DownloadRequest request, 
     return id;
 }
 
+void DownloadManager::setTypeFolders(bool enabled, std::map<std::string, std::string> folders) {
+    {
+        std::scoped_lock lock(mutex_);
+        sortByType_ = enabled;
+        typeFolders_ = folders;
+    }
+    httpDownloader_->setTypeFolders(std::move(folders));
+}
+
+namespace {
+bool sameFolder(const std::string& a, const std::filesystem::path& b) {
+    std::error_code ec;
+    return a.empty() || std::filesystem::path(a).lexically_normal() == b.lexically_normal() ||
+           std::filesystem::equivalent(a, b, ec);
+}
+}
+
 DownloadId DownloadManager::addHttpDownload(DownloadRequest request) {
+    {
+        std::scoped_lock lock(mutex_);
+        if (sortByType_ && sameFolder(request.destinationDir, defaultDownloadDir_)) request.sortByType = true;
+    }
     const std::string name = !request.suggestedName.empty() ? request.suggestedName : utils::fileNameFromUrl(request.source);
     return addTask(DownloadType::Http, std::move(request), name);
 }
@@ -184,6 +205,17 @@ DownloadId DownloadManager::addTorrent(DownloadRequest request) {
 }
 
 DownloadId DownloadManager::addMediaDownload(DownloadRequest request) {
+    {
+        // A video site's file name is only known later, but whether it's video or audio
+        // is known now.
+        std::scoped_lock lock(mutex_);
+        if (sortByType_ && sameFolder(request.destinationDir, defaultDownloadDir_)) {
+            const auto it = typeFolders_.find(request.mediaAudioOnly ? "audio" : "video");
+            if (it != typeFolders_.end() && !it->second.empty() && utils::ensureDirectoryExists(it->second)) {
+                request.destinationDir = it->second;
+            }
+        }
+    }
     const std::string name = !request.suggestedName.empty() ? request.suggestedName : request.source;
     return addTask(DownloadType::Media, std::move(request), name);
 }
@@ -962,6 +994,13 @@ std::string DownloadManager::resolveFileConflict(DownloadId id, FileConflictActi
                                           (action == FileConflictAction::Overwrite ? "will be replaced" : "is kept, new file renamed"));
     resume(id);
     return {};
+}
+
+void DownloadManager::inspectLink(const DownloadRequest& request, std::function<void(const RemoteProbe&)> done) {
+    runInBackground([this, request, done = std::move(done)](std::stop_token stop) {
+        const RemoteProbe result = httpDownloader_->probe(request);
+        if (!stop.stop_requested()) done(result);
+    });
 }
 
 void DownloadManager::probeLink(DownloadId id, const DownloadRequest& replacement, std::function<void(const RemoteProbe&)> done) {

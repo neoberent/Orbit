@@ -273,6 +273,41 @@ private slots:
                  qPrintable(QStringLiteral("second download was refused %1 times").arg(server_->rejectedGets() - rejectedFirst)));
     }
 
+    void mirrorsShareTheConnections() {
+        // A mirror with the same file serves part of the connections; the result is exact.
+        const QByteArray payload = randomPayload(8 * 1024 * 1024 + 99);
+        server_->setBehaviour({.payload = payload, .bytesPerTick = 128 * 1024});
+        TestHttpServer mirror;
+        mirror.setBehaviour({.payload = payload, .bytesPerTick = 128 * 1024});
+        QTemporaryDir dir;
+        Recorder rec;
+        HttpDownloader dl(rec.reporter());
+        DownloadRequest r = request(dir, "file.bin", 4);
+        r.mirrors = {mirror.url()};
+        dl.start(1, r);
+        QVERIFY(rec.waitForState(1, DownloadState::Completed, 60s));
+        QCOMPARE(readFile(rec.path(1)), payload);
+        QVERIFY2(mirror.rangedGetRequests() > 0, "the mirror should have served some of the file");
+        QVERIFY(server_->rangedGetRequests() > 0);
+    }
+
+    void mirrorWithAnotherFileIsNotUsed() {
+        // A "mirror" whose file has a different size is something else: it must not be used.
+        const QByteArray payload = randomPayload(4 * 1024 * 1024);
+        server_->setBehaviour({.payload = payload, .bytesPerTick = 128 * 1024});
+        TestHttpServer other;
+        other.setBehaviour({.payload = randomPayload(4 * 1024 * 1024 + 1)});
+        QTemporaryDir dir;
+        Recorder rec;
+        HttpDownloader dl(rec.reporter());
+        DownloadRequest r = request(dir, "file.bin", 4);
+        r.mirrors = {other.url()};
+        dl.start(1, r);
+        QVERIFY(rec.waitForState(1, DownloadState::Completed, 60s));
+        QCOMPARE(readFile(rec.path(1)), payload);
+        QCOMPARE(other.getRequests(), 0);
+    }
+
     void httpErrorFailsTheDownload() {
         server_->setBehaviour({.payload = randomPayload(1000), .status = 404});
         QTemporaryDir dir;

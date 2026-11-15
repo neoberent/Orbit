@@ -121,6 +121,16 @@ DownloadManager::TaskRecord DownloadManager::recordFor(const DownloadTask& task,
     add("speedLimit", std::to_string(req.speedLimitBytesPerSec));
     add("uploadLimit", std::to_string(req.uploadLimitBytesPerSec));
     add("sequential", req.sequential ? "1" : "0");
+    add("sortByType", req.sortByType ? "1" : "0");
+    {
+        std::string joined;
+        for (const std::string& mirror : req.mirrors) {
+            if (mirror.find_first_of(" \r\n") != std::string::npos) continue;
+            if (!joined.empty()) joined += ' ';
+            joined += mirror;
+        }
+        add("mirrors", joined);
+    }
     add("expectedChecksum", req.expectedChecksum);
     add("checksumState", checksumStateName(snap.checksumState));
     add("checksumDetail", snap.checksumDetail);
@@ -171,6 +181,13 @@ DownloadManager::Loaded DownloadManager::parseRecord(const TaskRecord& record) {
         else if (key == "speedLimit") q.speedLimitBytesPerSec = std::strtoull(value.c_str(), nullptr, 10);
         else if (key == "uploadLimit") q.uploadLimitBytesPerSec = std::strtoull(value.c_str(), nullptr, 10);
         else if (key == "sequential") q.sequential = (value == "1");
+        else if (key == "sortByType") q.sortByType = (value == "1");
+        else if (key == "mirrors") {
+            q.mirrors.clear();
+            for (const std::string& part : utils::split(value, ' ')) {
+                if (!part.empty() && q.mirrors.size() < 8) q.mirrors.push_back(part);
+            }
+        }
         else if (key == "expectedChecksum") q.expectedChecksum = value;
         else if (key == "checksumState") rec.checksumState = parseChecksumState(value);
         else if (key == "checksumDetail") rec.checksumDetail = value;

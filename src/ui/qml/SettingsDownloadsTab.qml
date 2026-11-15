@@ -103,4 +103,64 @@ ColumnLayout {
             }
         }
     }
+
+    SettingsGroup {
+        title: "Folders by type"
+        description: "Downloads headed for your download folder go to a folder for their type instead. Choosing a folder in the Add dialog still wins."
+
+        SettingsRow {
+            divider: false
+            label: "Sort into folders by type"
+            ToggleSwitch {
+                checked: appController.sortByType
+                onToggled: appController.sortByType = checked
+            }
+        }
+        Repeater {
+            model: [["video", "Videos"], ["audio", "Music"], ["image", "Pictures"], ["document", "Documents"],
+                    ["archive", "Archives"], ["program", "Programs and disk images"]]
+            delegate: SettingsRow {
+                required property var modelData
+                dimmed: !appController.sortByType
+                enabled: appController.sortByType
+                label: modelData[1]
+                description: appController.typeFolders[modelData[0]] || ""
+                ModernButton {
+                    text: "Change…"
+                    variant: "secondary"
+                    onClicked: {
+                        const dir = appController.pickFolder("Folder for " + modelData[1].toLowerCase(), appController.typeFolders[modelData[0]])
+                        if (dir.length > 0) appController.setTypeFolder(modelData[0], dir)
+                    }
+                }
+            }
+        }
+    }
+
+    SettingsGroup {
+        title: "When a download finishes"
+        description: "Not for files whose checksum didn't match."
+
+        SettingsRow {
+            divider: false
+            label: "Unpack archives"
+            description: "ZIP, 7z, RAR and tar files are unpacked into a folder beside them; the archive stays"
+            ToggleSwitch {
+                checked: appController.unpackArchives
+                onToggled: appController.unpackArchives = checked
+            }
+        }
+        SettingsRow {
+            label: "Run a command"
+            description: "%f is the file, %d its folder, %n its name. Run directly, without a shell; not included in backups."
+            FormField {
+                Layout.preferredWidth: 260
+                monospace: true
+                accessibleLabel: "Command to run after a download"
+                placeholderText: "e.g. notify-send Done %n"
+                text: appController.afterCommand
+                onEditingFinished: appController.afterCommand = text
+            }
+        }
+    }
 }

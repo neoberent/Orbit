@@ -39,6 +39,9 @@ const char* const kUsage =
     "      -d, --dir <folder>       Save them in this folder instead of the default one\n"
     "      -i, --input <file>       Also add every link in this file, one per line (- = stdin)\n"
     "      --checksum <type:hex>    Verify the file when it finishes (sha256:..., md5:...)\n"
+    "      --force                  Add it even if the same link was downloaded before\n"
+    "      --mirror <link>          Another link to the same file (repeatable); each serves\n"
+    "                               some of the connections\n"
     "  list, ls                     Show every download\n"
     "  status                       Show totals and current speeds\n"
     "  pause <id>... | --all        Pause downloads\n"
@@ -201,13 +204,16 @@ QString absoluteSource(const QString& arg) {
 int runCommand(const QString& command, const QStringList& args) {
     bool json = false;
     bool all = false;
+    bool force = false;
     QString directory;
     QString checksum;
+    QStringList mirrors;
     QStringList positional;
     for (int i = 0; i < args.size(); ++i) {
         const QString& a = args[i];
         if (a == QLatin1String("--json")) json = true;
         else if (a == QLatin1String("--all") || a == QLatin1String("-a")) all = true;
+        else if (a == QLatin1String("--force") || a == QLatin1String("-f")) force = true;
         else if (a == QLatin1String("-d") || a == QLatin1String("--dir")) {
             if (i + 1 >= args.size()) { printError(QStringLiteral("%1 needs a folder").arg(a)); return kExitUsage; }
             directory = QFileInfo(args[++i]).absoluteFilePath();
@@ -225,6 +231,9 @@ int runCommand(const QString& command, const QStringList& args) {
                 if (!line.isEmpty() && !line.startsWith(QLatin1Char('#'))) positional << line;
                 if (positional.size() > 1000) { printError(QStringLiteral("too many links (1000 at most)")); return kExitUsage; }
             }
+        } else if (a == QLatin1String("--mirror")) {
+            if (i + 1 >= args.size()) { printError(QStringLiteral("--mirror needs a link")); return kExitUsage; }
+            mirrors << args[++i];
         } else if (a == QLatin1String("--checksum")) {
             if (i + 1 >= args.size()) { printError(QStringLiteral("--checksum needs a value")); return kExitUsage; }
             checksum = args[++i];
@@ -283,6 +292,8 @@ int runCommand(const QString& command, const QStringList& args) {
             QJsonObject r{{"type", "add"}, {"source", absoluteSource(arg)}};
             if (!directory.isEmpty()) r.insert("directory", directory);
             if (!checksum.isEmpty()) r.insert("checksum", checksum);
+            if (force) r.insert("force", true);
+            if (!mirrors.isEmpty()) r.insert("mirrors", QJsonArray::fromStringList(mirrors));
             const auto reply = request(r);
             if (!reply) break;
             if (!reply->value("ok").toBool()) {

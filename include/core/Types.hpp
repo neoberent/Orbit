@@ -129,6 +129,15 @@ struct DownloadRequest {
     std::int64_t scheduledStartAt{0};
 
     FileConflictAction fileConflict{FileConflictAction::Default};
+
+    // Put the file in the folder for its type (Videos, Music, ...) once its name is known,
+    // instead of destinationDir. Set when the download went to the default folder while
+    // "Sort into folders by type" is on.
+    bool sortByType{false};
+
+    // Other links to the same file. Each one that reports the same size (and byte ranges)
+    // serves some of the connections; one that fails hands its part back to source.
+    std::vector<std::string> mirrors{};
 };
 
 // What the server says about a link, without downloading it.

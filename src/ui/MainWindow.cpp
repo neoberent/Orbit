@@ -19,6 +19,7 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QLocale>
 #include <QNetworkInformation>
 #include <QNetworkInterface>
 #include <QNetworkProxy>
@@ -97,6 +98,8 @@ bool isExcludedFromBackup(const QString& key) {
         "remote/username", "remote/passwordHash", "remote/passwordSalt", "remote/iterations",
         "network/proxyPassword", "updates/lastRunVersion", "updates/lastChecked",
         "ui/windowX", "ui/windowY",
+        // A command to run must never arrive from someone else's backup file.
+        "after/command",
     };
     return kExcluded.contains(key);
 }
@@ -209,6 +212,28 @@ MainWindow::MainWindow(orbit::core::DownloadManager& manager, bool portable, QOb
     applySchedule();
     scheduler_->setEnabled(scheduleEnabled_);
     applySpeedLimits();
+
+    {
+        // Folders per type, defaulting to the desktop's own Videos, Music, ... folders.
+        const QString downloads = downloadDirectory();
+        const QVariantMap defaults{
+            {"video", QStandardPaths::writableLocation(QStandardPaths::MoviesLocation)},
+            {"audio", QStandardPaths::writableLocation(QStandardPaths::MusicLocation)},
+            {"image", QStandardPaths::writableLocation(QStandardPaths::PicturesLocation)},
+            {"document", QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)},
+            {"archive", downloads + QStringLiteral("/Archives")},
+            {"program", downloads + QStringLiteral("/Programs")},
+        };
+        const QVariantMap saved = settings.value("downloads/typeFolders").toMap();
+        for (auto it = defaults.cbegin(); it != defaults.cend(); ++it) {
+            const QString folder = saved.value(it.key()).toString();
+            typeFolders_.insert(it.key(), folder.isEmpty() ? it.value() : folder);
+        }
+        sortByType_ = settings.value("downloads/sortByType", false).toBool();
+        applyTypeFolders();
+        unpackArchives_ = settings.value("after/unpackArchives", false).toBool();
+        afterCommand_ = settings.value("after/command").toString();
+    }
 
     networkLimits_ = settings.value("network/limits").toMap();
 #if defined(__linux__)
@@ -435,6 +460,113 @@ void MainWindow::setHttpSpeedLimitKBps(int kbps) {
     emit httpSpeedLimitKBpsChanged();
 }
 
+void MainWindow::applyTypeFolders() {
+    std::map<std::string, std::string> folders;
+    for (auto it = typeFolders_.cbegin(); it != typeFolders_.cend(); ++it) {
+        const QString folder = it.value().toString();
+        if (QDir::isAbsolutePath(folder)) folders[it.key().toStdString()] = QDir::cleanPath(folder).toStdString();
+    }
+    manager_.setTypeFolders(sortByType_, std::move(folders));
+}
+
+void MainWindow::setSortByType(bool enabled) {
+    if (enabled == sortByType_) return;
+    sortByType_ = enabled;
+    QSettings().setValue("downloads/sortByType", enabled);
+    applyTypeFolders();
+    emit afterDownloadChanged();
+}
+
+void MainWindow::setTypeFolder(const QString& type, const QString& folder) {
+    if (!typeFolders_.contains(type) || !QDir::isAbsolutePath(folder)) return;
+    typeFolders_.insert(type, QDir::cleanPath(folder));
+    QSettings().setValue("downloads/typeFolders", typeFolders_);
+    applyTypeFolders();
+    emit afterDownloadChanged();
+}
+
+void MainWindow::setUnpackArchives(bool enabled) {
+    if (enabled == unpackArchives_) return;
+    unpackArchives_ = enabled;
+    QSettings().setValue("after/unpackArchives", enabled);
+    emit afterDownloadChanged();
+}
+
+void MainWindow::setAfterCommand(const QString& command) {
+    const QString trimmed = command.trimmed().left(1000);
+    if (trimmed == afterCommand_) return;
+    afterCommand_ = trimmed;
+    QSettings().setValue("after/command", trimmed);
+    emit afterDownloadChanged();
+}
+
+void MainWindow::runAfterDownload(qlonglong id) {
+    const auto snap = manager_.snapshot(static_cast<orbit::core::DownloadId>(id));
+    if (!snap || snap->state != orbit::core::DownloadState::Completed || snap->destinationPath.empty()) return;
+    // A file that failed its checksum is left alone; one still being checked waits.
+    if (snap->checksumState == orbit::core::ChecksumState::Mismatch) return;
+    if (snap->checksumState == orbit::core::ChecksumState::Pending ||
+        snap->checksumState == orbit::core::ChecksumState::Verifying) {
+        QTimer::singleShot(1500, this, [this, id] { runAfterDownload(id); });
+        return;
+    }
+    const QString path = QString::fromStdString(snap->destinationPath);
+    const QFileInfo info(path);
+    if (!info.exists()) return;
+
+    if (unpackArchives_ && info.isFile() && snap->type != orbit::core::DownloadType::Torrent) {
+        static const QStringList kArchives{QStringLiteral(".zip"), QStringLiteral(".7z"), QStringLiteral(".rar"),
+                                           QStringLiteral(".tar"), QStringLiteral(".tgz"), QStringLiteral(".tar.gz"),
+                                           QStringLiteral(".tar.xz"), QStringLiteral(".tar.zst"), QStringLiteral(".tar.bz2")};
+        const QString lower = info.fileName().toLower();
+        QString stem;
+        for (const QString& ext : kArchives) {
+            if (lower.endsWith(ext)) stem = info.fileName().left(info.fileName().size() - ext.size());
+        }
+        const QString bsdtar = QStandardPaths::findExecutable(QStringLiteral("bsdtar"));
+        if (!stem.isEmpty() && !bsdtar.isEmpty()) {
+            // Into a new folder beside the archive, never over an existing one. bsdtar
+            // refuses absolute paths and ".." in archives, so nothing lands outside it.
+            QString target = info.absolutePath() + QLatin1Char('/') + stem;
+            for (int n = 1; QFileInfo::exists(target); ++n) {
+                target = info.absolutePath() + QLatin1Char('/') + stem + QStringLiteral(" (%1)").arg(n);
+            }
+            QDir().mkpath(target);
+            auto* process = new QProcess(this);
+            process->setProgram(bsdtar);
+            process->setArguments({QStringLiteral("-x"), QStringLiteral("-f"), path, QStringLiteral("-C"), target});
+            connect(process, &QProcess::finished, this, [this, process, target, name = info.fileName()](int code, QProcess::ExitStatus status) {
+                process->deleteLater();
+                const bool ok = status == QProcess::NormalExit && code == 0;
+                ORBIT_LOG_INFO("after", (ok ? "Unpacked " : "Couldn't unpack ") + name.toStdString());
+                if (!ok) QDir(target).removeRecursively();
+                emit afterDownloadNotice(ok ? QStringLiteral("Unpacked") : QStringLiteral("Couldn't unpack"),
+                                         ok ? name + QStringLiteral(" → ") + QFileInfo(target).fileName() : name, ok);
+            });
+            process->start();
+        }
+    }
+
+    if (!afterCommand_.isEmpty()) {
+        // Split like a shell would, but run directly (no shell), with the placeholders
+        // filled in per argument, so a file name can never inject anything.
+        QStringList args = QProcess::splitCommand(afterCommand_);
+        if (args.isEmpty()) return;
+        for (QString& arg : args) {
+            arg.replace(QStringLiteral("%f"), info.absoluteFilePath())
+                .replace(QStringLiteral("%d"), info.absolutePath())
+                .replace(QStringLiteral("%n"), info.fileName());
+        }
+        const QString program = args.takeFirst();
+        if (!QProcess::startDetached(program, args, info.absolutePath())) {
+            ORBIT_LOG_WARN("after", "Couldn't run the after-download command: " + program.toStdString());
+            emit afterDownloadNotice(QStringLiteral("Couldn't run the after-download command"), program, false);
+        } else {
+            ORBIT_LOG_INFO("after", "Ran the after-download command for download " + std::to_string(id));
+        }
+    }
+}
+
 QString MainWindow::currentNetwork() const {
 #if defined(__linux__)
     return networkIdentity_ ? networkIdentity_->name() : QString();
@@ -508,6 +640,56 @@ QString MainWindow::dataFolderPath() const {
 
 bool MainWindow::openDataFolder() const {
     return QDesktopServices::openUrl(QUrl::fromLocalFile(dataFolderPath()));
+}
+
+namespace {
+bool isPlayableName(const QString& name) {
+    static const QStringList kTypes{QStringLiteral("mp4"), QStringLiteral("mkv"), QStringLiteral("webm"), QStringLiteral("avi"),
+                                    QStringLiteral("mov"), QStringLiteral("m4v"), QStringLiteral("ts"), QStringLiteral("mp3"),
+                                    QStringLiteral("m4a"), QStringLiteral("opus"), QStringLiteral("ogg"), QStringLiteral("flac"),
+                                    QStringLiteral("wav"), QStringLiteral("aac")};
+    QString lower = name.toLower();
+    if (lower.endsWith(QLatin1String(".part"))) lower.chop(5);
+    return kTypes.contains(QFileInfo(lower).suffix());
+}
+}
+
+QString MainWindow::playWhileDownloading(qlonglong id) {
+    using orbit::core::DownloadType;
+    const auto snap = manager_.snapshot(static_cast<orbit::core::DownloadId>(id));
+    if (!snap) return QStringLiteral("This download no longer exists");
+    const QString destination = QString::fromStdString(snap->destinationPath);
+    QString path;
+    if (snap->type == DownloadType::Torrent) {
+        // The largest video or audio file in the torrent.
+        std::uint64_t largest = 0;
+        for (const auto& file : manager_.torrentEngine().files(snap->id)) {
+            const QString name = QString::fromStdString(file.path);
+            if (file.padding || file.priority == 0 || file.size <= largest || !isPlayableName(name)) continue;
+            largest = file.size;
+            path = QFileInfo(destination).absolutePath() + QLatin1Char('/') + name;
+        }
+        if (path.isEmpty()) return QStringLiteral("This torrent has no video or music to play");
+        manager_.setSequential(snap->id, true);
+    } else {
+        // yt-dlp writes to "<name>.part" until it's done.
+        for (const QString& candidate : {destination, destination + QStringLiteral(".part")}) {
+            if (QFileInfo(candidate).isFile()) {
+                path = candidate;
+                break;
+            }
+        }
+        if (path.isEmpty()) return QStringLiteral("Nothing has arrived yet; try again in a moment");
+        if (!isPlayableName(path) && snap->type != DownloadType::Media) return QStringLiteral("This isn't a video or music file");
+    }
+    for (const char* player : {"mpv", "vlc", "celluloid"}) {
+        const QString program = QStandardPaths::findExecutable(QString::fromLatin1(player));
+        if (!program.isEmpty() && QProcess::startDetached(program, {QStringLiteral("--"), path})) {
+            ORBIT_LOG_INFO("media", "Playing download " + std::to_string(id) + " in " + player);
+            return {};
+        }
+    }
+    return QDesktopServices::openUrl(QUrl::fromLocalFile(path)) ? QString() : QStringLiteral("No video player found");
 }
 
 void MainWindow::setBlurBehind(QObject* window, bool enabled) const {
@@ -623,6 +805,57 @@ int MainWindow::probeLink(qlonglong id, const QString& rawUrl) {
                            }, Qt::QueuedConnection);
                        });
     return token;
+}
+
+int MainWindow::inspectLink(const QString& rawUrl) {
+    const int token = nextProbeToken_++;
+    const QString url = rawUrl.trimmed();
+    const std::string source = url.toStdString();
+    QString kind = orbit::utils::isMagnetUri(source) ? QStringLiteral("torrent")
+                   : orbit::utils::isMediaUrl(source) ? QStringLiteral("media")
+                   : isHttpUrl(url) ? QStringLiteral("http") : QString();
+    if (kind != QLatin1String("http")) {
+        QVariantMap result{{"ok", !kind.isEmpty()}, {"kind", kind}, {"size", 0.0}, {"sizeText", QString()},
+                           {"fileName", kind == QLatin1String("torrent") ? QStringLiteral("Magnet link") : QString()},
+                           {"error", kind.isEmpty() ? QStringLiteral("Not a link Orbit can download") : QString()}};
+        QMetaObject::invokeMethod(this, [this, token, result] { emit linkInspected(token, result); }, Qt::QueuedConnection);
+        return token;
+    }
+    orbit::core::DownloadRequest request;
+    request.source = source;
+    QPointer<MainWindow> self(this);
+    manager_.inspectLink(request, [self, token](const orbit::core::RemoteProbe& probe) {
+        QVariantMap result{{"ok", probe.ok}, {"kind", QStringLiteral("http")},
+                           {"error", QString::fromStdString(probe.error)},
+                           {"size", static_cast<double>(probe.size)},
+                           {"sizeText", probe.size > 0 ? QString::fromStdString(orbit::utils::formatBytes(probe.size)) : QString()},
+                           {"fileName", QString::fromStdString(probe.fileName)}};
+        QMetaObject::invokeMethod(qApp, [self, token, result] {
+            if (self) emit self->linkInspected(token, result);
+        }, Qt::QueuedConnection);
+    });
+    return token;
+}
+
+QVariantMap MainWindow::previousDownloadOf(const QString& rawUrl) const {
+    // Compared without a trailing slash or fragment, which never change what's downloaded.
+    auto normalize = [](QString text) {
+        text = text.trimmed();
+        if (const int hash = text.indexOf(QLatin1Char('#')); hash >= 0 && !text.startsWith(QLatin1String("magnet:"))) text.truncate(hash);
+        while (text.endsWith(QLatin1Char('/'))) text.chop(1);
+        return text;
+    };
+    const QString wanted = normalize(rawUrl);
+    if (wanted.isEmpty()) return {{"found", false}};
+    for (const auto& snap : manager_.snapshot()) {
+        if (normalize(QString::fromStdString(snap.source)) != wanted) continue;
+        return {{"found", true},
+                {"id", static_cast<qlonglong>(snap.id)},
+                {"name", QString::fromStdString(snap.name)},
+                {"state", QString::fromLatin1(orbit::core::toString(snap.state))},
+                {"when", QLocale().toString(QDateTime::fromSecsSinceEpoch(snap.addedAt), QLocale::ShortFormat)}};
+    }
+    return {{"found", false}};
 }
 
 QString MainWindow::replaceLink(qlonglong id, const QString& rawUrl, bool startOver) {
@@ -806,6 +1039,19 @@ QJsonObject MainWindow::handleControlRequest(const QJsonObject& request) {
         }
         const QString checksum = request.value("checksum").toString().trimmed();
         if (!checksum.isEmpty()) download.expectedChecksum = checksum.toStdString();
+        for (const QJsonValue& value : request.value("mirrors").toArray()) {
+            const QString mirror = value.toString().trimmed();
+            if (!isHttpUrl(mirror) || download.mirrors.size() >= 8) return fail(QStringLiteral("Mirrors must be http(s) links: ") + mirror);
+            download.mirrors.push_back(mirror.toStdString());
+        }
+        if (!request.value("force").toBool()) {
+            const QVariantMap before = previousDownloadOf(source);
+            if (before.value("found").toBool()) {
+                return fail(QStringLiteral("already downloaded as download %1 (%2, added %3); use --force to download it again")
+                                .arg(before.value("id").toLongLong())
+                                .arg(before.value("state").toString().toLower(), before.value("when").toString()));
+            }
+        }
 
         DownloadId id = 0;
         if (source.endsWith(QStringLiteral(".torrent"), Qt::CaseInsensitive) && QDir::isAbsolutePath(source)) {

@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <functional>
 #include <list>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -93,6 +94,9 @@ public:
     // interface, such as a VPN's wg0 or tun0. While that interface is down nothing
     // connects, so traffic never falls back to the normal connection. Empty = any.
     void setNetworkInterface(const std::string& interfaceName);
+    // "Sort into folders by type": downloads headed for the default folder go to the
+    // folder for their type instead (see HttpDownloader::setTypeFolders).
+    void setTypeFolders(bool enabled, std::map<std::string, std::string> folders);
 
     // What a direct download does when its file name is already taken, unless the task
     // carries its own choice. Applies to downloads that haven't picked a file yet.
@@ -112,6 +116,9 @@ public:
     // or an empty string.
     void probeLink(DownloadId id, const DownloadRequest& replacement, std::function<void(const RemoteProbe&)> done);
     std::string replaceLink(DownloadId id, const DownloadRequest& replacement, bool startOver);
+    // Asks the server about a link that isn't a download yet (size, name, ranges), in the
+    // background.
+    void inspectLink(const DownloadRequest& request, std::function<void(const RemoteProbe&)> done);
 
     [[nodiscard]] std::vector<TaskRecord> exportRecords() const;
     // Adds tasks from a backup, skipping ones already in the list. Unfinished imports
@@ -168,6 +175,8 @@ private:
     int maxConcurrent_{3};
     FileConflictAction defaultConflict_{FileConflictAction::Rename};
     std::filesystem::path defaultDownloadDir_;
+    bool sortByType_{false};
+    std::map<std::string, std::string> typeFolders_;
     std::filesystem::path stateDir_;
 
     std::mutex subsMutex_;

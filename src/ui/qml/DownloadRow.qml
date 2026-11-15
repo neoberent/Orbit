@@ -127,6 +127,7 @@ Item {
         spacing: 0
 
         FileTile {
+            id: tile
             Layout.alignment: Qt.AlignVCenter
             Layout.rightMargin: Theme.compactRows ? 10 : 12
             size: Theme.fileTileSize
@@ -135,6 +136,24 @@ Item {
             isMedia: model.isMedia
             thumbnail: model.thumbnail
             muted: model.stateLabel === "Cancelled"
+
+            // A finished file can be dragged out by its tile, into a chat, an upload
+            // field or the file manager.
+            readonly property bool draggable: model.stateLabel === "Completed" && model.destination.length > 0
+            Drag.dragType: Drag.Automatic
+            Drag.supportedActions: Qt.CopyAction
+            Drag.mimeData: draggable ? { "text/uri-list": appController.fileUrl(model.destination) + "\r\n" } : {}
+            Drag.active: draggable && tileDrag.active
+            DragHandler {
+                id: tileDrag
+                enabled: tile.draggable
+                target: null
+                cursorShape: Qt.DragCopyCursor
+            }
+            HoverHandler {
+                enabled: tile.draggable
+                cursorShape: Qt.OpenHandCursor
+            }
         }
 
         ColumnLayout {

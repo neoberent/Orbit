@@ -3,6 +3,7 @@
 #include "core/IDownloader.hpp"
 #include "utils/SpeedLimiter.hpp"
 #include <atomic>
+#include <map>
 #include <deque>
 #include <chrono>
 #include <condition_variable>
@@ -53,6 +54,11 @@ public:
     // Every connection goes out through this interface only (curl's "if!" binding), or
     // fails while it's down. Empty = any interface.
     void setNetworkInterface(const std::string& interfaceName);
+    // Folder per file type ("video", "audio", "image", "document", "archive", "program"),
+    // used for downloads marked sortByType. A type without one stays in destinationDir.
+    void setTypeFolders(std::map<std::string, std::string> folders);
+    // The type a file name belongs to, as used for the folders above ("" for other files).
+    [[nodiscard]] static std::string fileTypeOf(const std::string& fileName);
 
     // A connection that delivers no data for this long is treated as dropped and
     // retried, instead of waiting on a silent server forever. Default 60 s.
@@ -83,6 +89,8 @@ private:
         std::atomic<bool> finished{false};
         std::atomic<bool> success{false};
         std::thread thread;
+        // The link this connection fetches from (the source or a mirror); empty = source.
+        std::string url;
     };
 
     struct Job {
@@ -125,6 +133,10 @@ private:
         orbit::utils::SpeedLimiter limiter;
 
         std::vector<std::unique_ptr<Segment>> segments;
+        // The source and the mirrors that checked out (same size, byte ranges), in the
+        // order connections are spread over them. Filled before the segments start.
+        std::vector<std::string> sources;
+        bool sourcesChecked{false};
 
         mutable std::mutex statsMutex;
         DownloadStats lastStats;
@@ -183,6 +195,7 @@ private:
     mutable std::mutex proxyMutex_;
     ProxySettings proxy_;
     std::string networkInterface_;
+    std::map<std::string, std::string> typeFolders_;
 
     // Supervisor threads are detached (a state-change listener may erase their Job from
     // inside the supervisor's own callback, so nobody can own and join them), but every

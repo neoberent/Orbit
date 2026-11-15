@@ -38,6 +38,10 @@ Dialog {
     property int selectedFilesSize: 0
     property string pendingSource: ""
 
+    // Several links pasted at once go to the Add Many Links dialog instead (a pasted
+    // text's line breaks arrive as spaces in this one-line field).
+    signal manyLinksPasted(string text)
+
     property bool mediaContext: false
     property bool pendingMediaMode: false
     property bool sourceIsMedia: false
@@ -112,6 +116,7 @@ Dialog {
     }
 
     function resetForm() {
+        mirrorsField.text = ""
         sourceField.text = ""
         destField.text = appController.downloadDirectory
         connectionsCount = appController.maxConnectionsPerDownload
@@ -283,8 +288,9 @@ Dialog {
                 downloadModel.addDownload(base)
             }
         } else {
+            const mirrors = mirrorsField.text.trim().split(/\s+/).filter(m => m.length > 0 && appController.isMagnetOrUrl(m) && !m.startsWith("magnet:"))
             downloadModel.addDownload({ kind: "http", source: source, directory: destField.text, connections: connectionsCount,
-                                        checksum: checksum, startAt: startAt })
+                                        checksum: checksum, startAt: startAt, mirrors: mirrors })
         }
         root.close()
     }
@@ -479,6 +485,14 @@ Dialog {
                                     leftPadding: 0
                                     rightPadding: 0
                                     onTextChanged: {
+                                        const parts = text.trim().split(/\s+/).filter(p => appController.isMagnetOrUrl(p))
+                                        if (parts.length > 1) {
+                                            const many = text
+                                            text = ""
+                                            root.close()
+                                            root.manyLinksPasted(many)
+                                            return
+                                        }
                                         root.errorMessage = ""
                                         root.tryParseTorrentFile(text)
                                         root.sourceIsMedia = text.length > 0 && downloadModel.isMediaSource(text)
@@ -512,6 +526,17 @@ Dialog {
                                 }
                             }
                         }
+                    }
+
+                    Text {
+                        // Warns before the same link is downloaded a second time.
+                        readonly property var before: root.sourceText.length > 0 ? appController.previousDownloadOf(root.sourceText) : ({ found: false })
+                        visible: before.found === true
+                        Layout.fillWidth: true
+                        text: visible ? "Already in your list: “" + before.name + "” (" + before.state.toLowerCase() + ", added " + before.when + "). Adding it again downloads a second copy." : ""
+                        color: Theme.warning
+                        font.pixelSize: Theme.fontCaption
+                        wrapMode: Text.Wrap
                     }
 
                     RowLayout {
@@ -887,6 +912,19 @@ Dialog {
                                 iconName: "shield"
                                 accessibleLabel: "Checksum"
                                 placeholderText: "SHA-256, SHA-1 or MD5 published by the site"
+                            }
+                        }
+                        SettingsRow {
+                            visible: !root.torrentSource && !root.showMediaOptions
+                            label: "Mirrors"
+                            description: "Other links to the same file; each serves some of the connections"
+                            extra: FormField {
+                                id: mirrorsField
+                                Layout.fillWidth: true
+                                monospace: true
+                                iconName: "link"
+                                accessibleLabel: "Mirrors"
+                                placeholderText: "https://mirror1/…  https://mirror2/…  (separated by spaces)"
                             }
                         }
                     }

@@ -74,6 +74,15 @@ class MainWindow final : public QObject {
 
     Q_PROPERTY(bool portable READ portable CONSTANT)
 
+    // Sort downloads headed for the default folder into one folder per type.
+    Q_PROPERTY(bool sortByType READ sortByType WRITE setSortByType NOTIFY afterDownloadChanged)
+    // {video, audio, image, document, archive, program} -> folder.
+    Q_PROPERTY(QVariantMap typeFolders READ typeFolders NOTIFY afterDownloadChanged)
+    // Unpack finished archives into a folder beside them.
+    Q_PROPERTY(bool unpackArchives READ unpackArchives WRITE setUnpackArchives NOTIFY afterDownloadChanged)
+    // A command run for every finished download; %f = the file, %d = its folder, %n = its name.
+    Q_PROPERTY(QString afterCommand READ afterCommand WRITE setAfterCommand NOTIFY afterDownloadChanged)
+
     // The network interface every download is bound to ("" = any), e.g. a VPN's wg0.
     Q_PROPERTY(QString networkInterface READ networkInterface WRITE setNetworkInterface NOTIFY networkInterfaceChanged)
     // Pauses downloads and seeding while the connection is metered (a phone hotspot, a
@@ -115,6 +124,13 @@ public:
     // Asks the server about a new link; the answer arrives through linkProbed(token, result)
     // with result = {ok, error, size, sizeText, supportsRanges, fileName}.
     Q_INVOKABLE int probeLink(qlonglong id, const QString& url);
+    // Checks a link that isn't a download yet; the answer arrives through linkInspected
+    // with the same fields as linkProbed. Magnet and media links answer at once with
+    // their kind and no size.
+    Q_INVOKABLE int inspectLink(const QString& url);
+    // An earlier download of the same link: {found, id, name, state, when}. Used to warn
+    // before downloading something twice.
+    Q_INVOKABLE QVariantMap previousDownloadOf(const QString& url) const;
     // Returns an error message, or an empty string once the download is queued again.
     Q_INVOKABLE QString replaceLink(qlonglong id, const QString& url, bool startOver);
 
@@ -189,6 +205,17 @@ public:
 
     [[nodiscard]] bool portable() const noexcept { return portable_; }
 
+    [[nodiscard]] bool sortByType() const noexcept { return sortByType_; }
+    void setSortByType(bool enabled);
+    [[nodiscard]] QVariantMap typeFolders() const { return typeFolders_; }
+    Q_INVOKABLE void setTypeFolder(const QString& type, const QString& folder);
+    [[nodiscard]] bool unpackArchives() const noexcept { return unpackArchives_; }
+    void setUnpackArchives(bool enabled);
+    [[nodiscard]] QString afterCommand() const { return afterCommand_; }
+    void setAfterCommand(const QString& command);
+    // Runs the after-download actions for a download that just finished.
+    void runAfterDownload(qlonglong id);
+
     // Without a window nobody can answer a question, so .torrent files open from outside
     // start with every file, and a file name that's taken gets a new name.
     void setHeadless(bool headless);
@@ -217,6 +244,8 @@ public:
     Q_INVOKABLE bool isMagnetOrUrl(const QString& text) const;
 
     Q_INVOKABLE QString toLocalFilePath(const QUrl& url) const { return url.toLocalFile(); }
+    // file:// URL of a local path, properly encoded (for drag and drop).
+    Q_INVOKABLE QString fileUrl(const QString& path) const { return QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded); }
     Q_INVOKABLE bool openDataFolder() const;
     // Opens the file's folder with the file selected.
     Q_INVOKABLE bool revealFile(const QString& path) const;
@@ -224,6 +253,10 @@ public:
     // Asks the compositor to blur the desktop behind a translucent window (KDE Plasma's
     // hint; compositors without it ignore it, Hyprland blurs translucent windows anyway).
     Q_INVOKABLE void setBlurBehind(QObject* window, bool enabled) const;
+    // Opens a video or song that's still downloading in a player (mpv, VLC or Celluloid if
+    // installed, else the default app). A torrent switches to downloading in order first,
+    // so playback can keep up. Returns an error message, or an empty string.
+    Q_INVOKABLE QString playWhileDownloading(qlonglong id);
 
     // Adds a download handed to Orbit from outside the app (browser extension via the
     // orbit:// protocol, or another launched instance). A plain link or magnet starts
@@ -261,6 +294,7 @@ signals:
     void linkCaptureTargetChanged();
     void linkCaptured(qlonglong id, const QString& url, bool withBrowserSession);
     void linkProbed(int token, const QVariantMap& result);
+    void linkInspected(int token, const QVariantMap& result);
 
     void remoteAccessEnabledChanged();
     void remotePortChanged();
@@ -277,6 +311,9 @@ signals:
     void networkInterfaceChanged();
     void meteredChanged();
     void networkLimitsChanged();
+    void afterDownloadChanged();
+    // An after-download action finished: ok, and a message for the user.
+    void afterDownloadNotice(const QString& title, const QString& message, bool ok);
     // count downloads were paused because the connection became metered.
     void meteredPaused(int count);
     void showWindowRequested();
@@ -343,6 +380,12 @@ private:
     bool browserIntegrationEnabled_{true};
 
     bool headless_{false};
+    void applyTypeFolders();
+
+    bool sortByType_{false};
+    QVariantMap typeFolders_;
+    bool unpackArchives_{false};
+    QString afterCommand_;
     QString networkInterface_;
     bool pauseOnMetered_{true};
     bool metered_{false};

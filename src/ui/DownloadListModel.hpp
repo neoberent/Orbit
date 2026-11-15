@@ -61,6 +61,7 @@ public:
         FileConflictPathRole,
         CanRefreshLinkRole,
         SegmentsRole,
+        AddedSectionRole,
         ThumbnailRole,
     };
     Q_ENUM(Roles)
@@ -127,6 +128,9 @@ public:
 
     Q_INVOKABLE int countByCategory(const QString& category) const;
     Q_INVOKABLE QVariantMap get(qlonglong id) const;
+    // Downloads whose name or source contains every word of query (case-insensitive),
+    // newest first: [{taskId, name, stateLabel, isTorrent, isMedia}].
+    Q_INVOKABLE QVariantList search(const QString& query, int limit) const;
     Q_INVOKABLE QVariantMap rates() const;
 
 signals:

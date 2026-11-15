@@ -22,6 +22,10 @@ Rectangle {
 
     signal addRequested()
 
+    function clearSearch() {
+        searchField.text = ""
+    }
+
     function focusSearch() {
         searchField.forceActiveFocus()
         searchField.selectAll()

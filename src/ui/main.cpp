@@ -142,10 +142,6 @@ void waitForPreviousInstance(int argc, char* argv[]) {
 }
 
 #if !defined(_WIN32)
-// Orbit places its own windows (the splash over the saved window position, the clipboard
-// prompt by the tray, the main window where it was left), which Wayland doesn't allow
-// clients to do. Under a Wayland session it therefore runs through XWayland, where it
-// behaves exactly as on Windows; QT_QPA_PLATFORM still picks something else.
 // Started through a symlink (~/.local/bin/orbit), Qt reports the link's folder as Orbit's
 // own, where orbit-native-host, portable.flag and in-app updates don't belong. Qt takes
 // that path from the kernel, so Orbit restarts itself from its real location instead.
@@ -163,10 +159,15 @@ void runFromRealLocation(char* argv[]) {
 
 // Returns whether it set QT_QPA_PLATFORM, which is cleared again once Qt has started so
 // programs Orbit opens (a video player, the file manager) keep their own default.
+// Under Wayland Orbit runs natively (sharp text with fractional scaling, the compositor's
+// own window management), falling back to X11 if the Wayland plugin can't start. The
+// pieces that placed their own windows behave accordingly: no splash screen, and the
+// clipboard offer comes as a notification. ORBIT_X11=1 keeps the old XWayland behaviour.
 bool choosePlatform() {
     if (!qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) return false;
-    if (qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") || qEnvironmentVariableIsEmpty("DISPLAY")) return false;
-    qputenv("QT_QPA_PLATFORM", "xcb;wayland");
+    if (qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")) return false;
+    const bool forceX11 = qEnvironmentVariable("ORBIT_X11") == QLatin1String("1") && !qEnvironmentVariableIsEmpty("DISPLAY");
+    qputenv("QT_QPA_PLATFORM", forceX11 ? "xcb;wayland" : "wayland;xcb");
     return true;
 }
 
@@ -302,8 +303,12 @@ int main(int argc, char* argv[]) {
     appFont.setHintingPreference(QFont::PreferFullHinting);
     QApplication::setFont(appFont);
 
+    // The splash is an X11 window positioned over where Orbit's window will be, which a
+    // native Wayland client can't do; there the window simply opens.
+    const bool nativeWayland = QGuiApplication::platformName().startsWith(QLatin1String("wayland"));
+    if (nativeWayland) ORBIT_LOG_INFO("main", "Running as a native Wayland client");
     std::optional<SplashScreen> splash;
-    if (!startInBackground) {
+    if (!startInBackground && !nativeWayland) {
         splash.emplace(QApplication::applicationVersion());
         splash->show();
         splash->setStatus(QStringLiteral("Starting up"), 0.08);
@@ -342,6 +347,15 @@ int main(int argc, char* argv[]) {
     controlServer.listen();
 #endif
     QObject::connect(&controller, &MainWindow::showWindowRequested, &trayController, &TrayController::showAndRaise);
+    // After-download actions run here, in C++, so they work headless too.
+    QObject::connect(&downloadModel, &DownloadListModel::transferFinished, &controller,
+                     [&controller](qlonglong id, const QString&, bool success, const QString&) {
+                         if (success) controller.runAfterDownload(id);
+                     });
+    QObject::connect(&controller, &MainWindow::afterDownloadNotice, &trayController,
+                     [&trayController](const QString& title, const QString& message, bool ok) {
+                         trayController.notify(title, message, !ok);
+                     });
     QObject::connect(&controller, &MainWindow::meteredPaused, &trayController, [&trayController](int count) {
         trayController.notifyMetered(count);
     });
@@ -484,6 +498,10 @@ int main(int argc, char* argv[]) {
         // The window stays hidden until the tray icon (or `orbit show`) opens it.
         uiRevealed = true;
         ORBIT_LOG_INFO("main", headless ? "Started headless" : "Started in the tray");
+        releaseDeferredPayloads();
+    } else if (!splash) {
+        uiRevealed = true;
+        if (rootWindow) QMetaObject::invokeMethod(rootWindow, "reveal");
         releaseDeferredPayloads();
     } else {
         QObject::connect(&*splash, &SplashScreen::revealRequested, &app, [&] {

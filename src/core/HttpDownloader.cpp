@@ -698,6 +698,35 @@ int HttpDownloader::perform(void* handle, const std::string& url) const {
     return result;
 }
 
+void HttpDownloader::setTypeFolders(std::map<std::string, std::string> folders) {
+    std::scoped_lock lock(proxyMutex_);
+    typeFolders_ = std::move(folders);
+}
+
+std::string HttpDownloader::fileTypeOf(const std::string& fileName) {
+    static const std::map<std::string, std::string> kTypes = {
+        {"mp4", "video"}, {"mkv", "video"}, {"webm", "video"}, {"avi", "video"}, {"mov", "video"}, {"wmv", "video"},
+        {"flv", "video"}, {"m4v", "video"}, {"ts", "video"},
+        {"mp3", "audio"}, {"m4a", "audio"}, {"flac", "audio"}, {"wav", "audio"}, {"ogg", "audio"}, {"opus", "audio"},
+        {"aac", "audio"}, {"wma", "audio"},
+        {"png", "image"}, {"jpg", "image"}, {"jpeg", "image"}, {"gif", "image"}, {"webp", "image"}, {"svg", "image"},
+        {"bmp", "image"}, {"tiff", "image"}, {"heic", "image"}, {"avif", "image"},
+        {"pdf", "document"}, {"doc", "document"}, {"docx", "document"}, {"txt", "document"}, {"md", "document"},
+        {"epub", "document"}, {"xls", "document"}, {"xlsx", "document"}, {"ppt", "document"}, {"pptx", "document"},
+        {"csv", "document"}, {"odt", "document"}, {"ods", "document"}, {"rtf", "document"},
+        {"zip", "archive"}, {"rar", "archive"}, {"7z", "archive"}, {"tar", "archive"}, {"gz", "archive"}, {"tgz", "archive"},
+        {"bz2", "archive"}, {"xz", "archive"}, {"zst", "archive"},
+        {"exe", "program"}, {"msi", "program"}, {"deb", "program"}, {"rpm", "program"}, {"appimage", "program"},
+        {"apk", "program"}, {"dmg", "program"}, {"pkg", "program"}, {"iso", "program"}, {"flatpakref", "program"},
+    };
+    const auto dot = fileName.rfind('.');
+    if (dot == std::string::npos) return {};
+    std::string ext = fileName.substr(dot + 1);
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const auto it = kTypes.find(ext);
+    return it == kTypes.end() ? std::string() : it->second;
+}
+
 void HttpDownloader::setCheckpointInterval(std::chrono::milliseconds interval) {
     checkpointIntervalMs_ = std::max<long>(100, static_cast<long>(interval.count()));
 }
@@ -1007,6 +1036,15 @@ void HttpDownloader::runSupervisor(DownloadId id) {
                 std::string finalName = !job.request.suggestedName.empty() ? job.request.suggestedName
                                          : (fileName.empty() ? std::string("download") : fileName);
                 finalName = utils::sanitizeFileName(finalName);
+                if (job.request.sortByType) {
+                    std::string folder;
+                    {
+                        std::scoped_lock folderLock(proxyMutex_);
+                        const auto it = typeFolders_.find(fileTypeOf(finalName));
+                        if (it != typeFolders_.end()) folder = it->second;
+                    }
+                    if (!folder.empty() && utils::ensureDirectoryExists(folder)) job.request.destinationDir = folder;
+                }
                 const std::filesystem::path desired = std::filesystem::path(job.request.destinationDir) / finalName;
                 job.filePath = resolveTargetPath(job, desired);
                 if (job.filePath.empty()) conflictPath = desired;
@@ -1124,6 +1162,34 @@ void HttpDownloader::runSupervisor(DownloadId id) {
         seg.finished = false;
     }
 
+    // Mirrors serve connections only if they offer the very same file: same size, ranges.
+    if (!job.sourcesChecked) {
+        job.sourcesChecked = true;
+        job.sources = {job.request.source};
+        if (job.supportsRanges && job.totalBytes > 0) {
+            for (const std::string& mirror : job.request.mirrors) {
+                if (job.sources.size() >= 5 || job.paused.load() || job.cancelStart.load()) break;
+                if (mirror.empty() || mirror == job.request.source) continue;
+                DownloadRequest probeRequest = job.request;
+                probeRequest.source = mirror;
+                std::uint64_t mirrorSize = 0;
+                bool mirrorRanges = false;
+                std::string ignoredName;
+                std::string mirrorError;
+                if (probeRemote(probeRequest, mirrorSize, mirrorRanges, ignoredName, mirrorError, &job) &&
+                    mirrorSize == job.totalBytes && mirrorRanges) {
+                    job.sources.push_back(mirror);
+                } else {
+                    ORBIT_LOG_WARN("HttpDownloader", "Not using mirror " + mirror + ": " +
+                                                         (mirrorError.empty() ? "a different file or no byte ranges" : mirrorError));
+                }
+            }
+            if (job.sources.size() > 1) {
+                ORBIT_LOG_INFO("HttpDownloader", "Download " + std::to_string(id) + " uses " + std::to_string(job.sources.size()) + " sources");
+            }
+        }
+    }
+
     // A resumed download can carry more unfinished segments than the configured
     // connection count (rebalancing helpers are saved too), so only run up to
     // desiredConnections at once and start the rest as earlier ones complete.
@@ -1136,6 +1202,7 @@ void HttpDownloader::runSupervisor(DownloadId id) {
         for (int i = 0; i < static_cast<int>(job.segments.size()) && running < std::max(1, job.desiredConnections.load()); ++i) {
             Segment& seg = *job.segments[i];
             if (seg.finished.load() || seg.thread.joinable()) continue;
+            if (seg.url.empty() && !job.sources.empty()) seg.url = job.sources[static_cast<size_t>(i) % job.sources.size()];
             seg.thread = std::thread(&HttpDownloader::downloadSegment, this, std::ref(job), std::ref(seg), i);
             ++running;
         }
@@ -1287,7 +1354,8 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
     }
 
     applyRequestOptions(curl, job.request);
-    curl_easy_setopt(curl, CURLOPT_URL, job.request.source.c_str());
+    std::string url = segment.url.empty() ? job.request.source : segment.url;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteCallback);
     // Without this an HTTP error page (e.g. a 429 "slow down" response) is written into
     // the file as if it were the payload, and the download ends up "Completed".
@@ -1359,7 +1427,7 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
     auto performGated = [&](WriteContext& ctx) {
         if (!acquireSlot()) return CURLE_ABORTED_BY_CALLBACK;
         ctx.arm();
-        const CURLcode result = stallAsTimeout(static_cast<CURLcode>(perform(curl, job.request.source)), ctx);
+        const CURLcode result = stallAsTimeout(static_cast<CURLcode>(perform(curl, url)), ctx);
         --job.requestsInFlight;
         return result;
     };
@@ -1431,6 +1499,14 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
             if (res != CURLE_OK) {
                 if (res == CURLE_ABORTED_BY_CALLBACK) break;
                 if (shouldRetry(res)) continue;
+                if (url != job.request.source) {
+                    // The mirror gave up on this part: the main link finishes it.
+                    ORBIT_LOG_WARN("HttpDownloader", "Mirror failed (" + std::string(curl_easy_strerror(res)) + "); using the main link: " + url);
+                    url = job.request.source;
+                    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+                    retries = 0;
+                    continue;
+                }
                 sawRealError = true;
                 break;
             }
@@ -1503,6 +1579,7 @@ void HttpDownloader::rebalanceSegments(Job& job) {
     auto helper = std::make_unique<Segment>();
     helper->startOffset = splitPoint;
     helper->endOffset = oldEnd;
+    if (!job.sources.empty()) helper->url = job.sources[job.segments.size() % job.sources.size()];
     Segment* helperPtr = helper.get();
     job.segments.push_back(std::move(helper));
     helperPtr->thread = std::thread(&HttpDownloader::downloadSegment, this, std::ref(job), std::ref(*helperPtr), -1);

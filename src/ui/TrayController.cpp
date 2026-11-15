@@ -13,6 +13,7 @@
 #include <QPixmap>
 
 #include <algorithm>
+#include <utility>
 #include <QGuiApplication>
 #include <QMetaObject>
 #include <QQuickWindow>
@@ -28,6 +29,12 @@ TrayController::TrayController(bool showIcon, QObject* parent) : QObject(parent)
             [this](const QString& tag, const QString& key) {
                 if (key == QLatin1String("default")) {
                     showAndRaise();
+                    return;
+                }
+                if (tag == QLatin1String("links")) {
+                    if (key == QLatin1String("download") || key == QLatin1String("review")) {
+                        emit linksActionRequested(key, std::exchange(offeredLinks_, {}));
+                    }
                     return;
                 }
                 if (tag == QLatin1String("metered")) {
@@ -162,6 +169,25 @@ void TrayController::notifyTransfer(qlonglong id, const QString& title, const QS
     Q_UNUSED(id)
 #endif
     showMessage(title, message, !success, 5000);
+}
+
+bool TrayController::offerLinks(const QStringList& links) {
+#if defined(__linux__)
+    if (links.isEmpty() || !desktopNotifications_ || !desktopNotifications_->available() ||
+        !desktopNotifications_->supportsActions()) {
+        return false;
+    }
+    offeredLinks_ = links;
+    const QString title = links.size() == 1 ? QStringLiteral("Download the copied link?")
+                                            : QStringLiteral("Download %1 copied links?").arg(links.size());
+    QList<DesktopNotifications::Action> actions{{QStringLiteral("download"), QStringLiteral("Download")}};
+    if (links.size() == 1) actions << DesktopNotifications::Action{QStringLiteral("review"), QStringLiteral("Review…")};
+    desktopNotifications_->notify(title, links.first(), false, QStringLiteral("transfer"), actions, QStringLiteral("links"));
+    return true;
+#else
+    Q_UNUSED(links)
+    return false;
+#endif
 }
 
 void TrayController::notifyMetered(int count) {

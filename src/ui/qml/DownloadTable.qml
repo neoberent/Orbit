@@ -100,6 +100,19 @@ Item {
         if (button === Qt.RightButton) openMenu()
     }
 
+    // Selects one download and scrolls to it (from the command palette).
+    function revealId(id) {
+        if (!proxy) return false
+        const row = proxy.rowOfId(id)
+        if (row < 0) return false
+        setSelection([id], id)
+        anchorId = id
+        listView.currentIndex = row
+        listView.positionViewAtIndex(row, ListView.Center)
+        listView.forceActiveFocus()
+        return true
+    }
+
     function moveFocus(delta, extend) {
         if (!proxy || listView.count === 0) return
         const current = focusId >= 0 ? proxy.rowOfId(focusId) : -1
@@ -190,6 +203,7 @@ Item {
             count: list.length,
             single: single,
             canOpenFile: single !== null && single.stateLabel === "Completed",
+            canPlayEarly: single !== null && root.canPlayEarly(single),
             canPause: list.filter(it => it.isActive).length,
             canResume: list.filter(it => it.isPaused).length,
             canRetry: list.filter(it => root.isRetryable(it)).length,
@@ -205,6 +219,18 @@ Item {
             torrentLive: single !== null && single.isTorrent && (single.isActive || single.isPaused || single.stateLabel === "Completed")
         }
         contextMenu.popup()
+    }
+
+    // A video, song or torrent that's on its way can already be watched or heard.
+    function canPlayEarly(it) {
+        if (!(it.stateLabel === "Downloading" || it.isPaused) || it.progress < 0.02) return false
+        const kind = Theme.fileKind(it.name, it.isTorrent, it.isMedia)
+        return it.isTorrent || kind === "video" || kind === "audio"
+    }
+
+    function playEarly(id) {
+        const error = appController.playWhileDownloading(id)
+        root.feedback(error.length > 0 ? error : "Opening in your player…", error.length === 0)
     }
 
     function countLabel(verb, n) {
@@ -237,6 +263,13 @@ Item {
             visible: root.menuState.canOpenFile === true
             height: visible ? implicitHeight : 0
             onTriggered: downloadModel.openFile(root.menuState.single.taskId)
+        }
+        OrbitMenuItem {
+            text: "Play While Downloading"
+            iconName: "media"
+            visible: root.menuState.canPlayEarly === true
+            height: visible ? implicitHeight : 0
+            onTriggered: root.playEarly(root.menuState.single.taskId)
         }
         OrbitMenuItem {
             text: "Open Containing Folder"
@@ -513,6 +546,27 @@ Item {
         activeFocusOnTab: true
 
         delegate: DownloadRow { table: root }
+
+        // Sorted by date added, the list falls into Today / Yesterday / This week / ...
+        section.property: root.sortKey === "added" ? "addedSection" : ""
+        section.criteria: ViewSection.FullString
+        section.delegate: Item {
+            required property string section
+            width: ListView.view ? ListView.view.width : 0
+            height: 30
+            Text {
+                anchors.left: parent.left
+                anchors.leftMargin: 16
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 6
+                text: parent.section
+                color: Theme.textTertiary
+                font.pixelSize: Theme.fontMicro
+                font.weight: Font.DemiBold
+                font.letterSpacing: Theme.trackingWider
+                font.capitalization: Font.AllUppercase
+            }
+        }
 
         onCountChanged: root.prune()
         onHeightChanged: if (currentIndex >= 0 && root.hasSelection) positionViewAtIndex(currentIndex, ListView.Contain)

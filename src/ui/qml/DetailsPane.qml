@@ -257,6 +257,12 @@ Rectangle {
                     onClicked: downloadModel.openFile(root.item.taskId)
                 }
                 IconButton {
+                    visible: !root.multi && root.valid && root.table && root.table.canPlayEarly(root.item)
+                    iconName: "media"
+                    tooltip: "Play while downloading"
+                    onClicked: root.table.playEarly(root.item.taskId)
+                }
+                IconButton {
                     visible: !root.multi
                     iconName: "edit"
                     tooltip: "Rename"

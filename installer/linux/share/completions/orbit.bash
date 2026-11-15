@@ -15,10 +15,10 @@ _orbit() {
             case $prev in
                 -d|--dir) COMPREPLY=($(compgen -d -- "$cur")); return ;;
                 -i|--input) COMPREPLY=($(compgen -f -- "$cur")); return ;;
-                --checksum) return ;;
+                --checksum|--mirror) return ;;
             esac
             if [[ $cur == -* ]]; then
-                COMPREPLY=($(compgen -W "--dir --input --checksum --json" -- "$cur"))
+                COMPREPLY=($(compgen -W "--dir --input --checksum --force --mirror --json" -- "$cur"))
             else
                 COMPREPLY=($(compgen -f -X '!*.torrent' -- "$cur") $(compgen -d -- "$cur"))
             fi

@@ -25,6 +25,8 @@ complete -c orbit -n '__fish_seen_subcommand_from add' -F
 complete -c orbit -n '__fish_seen_subcommand_from add' -s d -l dir -x -a '(__fish_complete_directories)' -d 'Save in this folder'
 complete -c orbit -n '__fish_seen_subcommand_from add' -s i -l input -r -F -d 'Add every link in this file'
 complete -c orbit -n '__fish_seen_subcommand_from add' -l checksum -x -d 'sha256:<hex> to verify'
+complete -c orbit -n '__fish_seen_subcommand_from add' -s f -l force -d 'Add even if downloaded before'
+complete -c orbit -n '__fish_seen_subcommand_from add' -l mirror -x -d 'Another link to the same file'
 complete -c orbit -n '__fish_seen_subcommand_from pause resume cancel remove rm' -x -a '(__orbit_download_ids)'
 complete -c orbit -n '__fish_seen_subcommand_from pause resume cancel' -s a -l all -d 'Every download'
 complete -c orbit -n '__fish_seen_subcommand_from add list ls status' -l json -d 'Print JSON'
