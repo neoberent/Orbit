@@ -1507,7 +1507,23 @@ void MainWindow::repairBrowserIntegration() {
     orbit::core::protocol::registerWindowsProtocolHandler(exePath);
     orbit::core::protocol::registerWindowsTorrentFileAssociation(exePath);
 #elif defined(__linux__)
-    linux_integration::registerDesktopEntry(QCoreApplication::applicationFilePath());
+    const std::string packaging = orbit::utils::linuxPackaging();
+    if (packaging == "flatpak") {
+        // The Flatpak's own .desktop file is installed with it; browsers can't start a
+        // sandboxed helper, so the extension falls back to orbit:// links.
+        browserIntegrationStatus_ = QStringLiteral("Handled by the Flatpak; the extension uses orbit:// links");
+        emit browserIntegrationChanged();
+        return;
+    }
+    // An AppImage runs from a temporary mount: the menu entry points at the AppImage file.
+    const QString appImage = qEnvironmentVariable("APPIMAGE");
+    linux_integration::registerDesktopEntry(packaging == "appimage" && !appImage.isEmpty() ? appImage
+                                                                                           : QCoreApplication::applicationFilePath());
+    if (packaging == "appimage") {
+        browserIntegrationStatus_ = QStringLiteral("Not available in the AppImage; the extension uses orbit:// links");
+        emit browserIntegrationChanged();
+        return;
+    }
 #endif
     const QString error = browser_integration::registerNativeMessagingHost();
     browserIntegrationStatus_ = error.isEmpty() ? QStringLiteral("Ready for Chrome, Edge, Brave and Firefox") : error;

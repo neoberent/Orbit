@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Orbit
+GenericName=Download Manager
+Comment=Multi-connection HTTP, BitTorrent and video downloads
+Exec=orbit %u
+Icon=orbit
+Terminal=false
+Categories=Network;FileTransfer;
+MimeType=x-scheme-handler/orbit;application/x-bittorrent;x-scheme-handler/magnet;
+StartupNotify=true
+StartupWMClass=orbit
+Keywords=download;torrent;magnet;youtube;

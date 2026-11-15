@@ -1,0 +1,68 @@
+# Flatpak build of Orbit.
+#   flatpak install flathub org.kde.Sdk//6.9 org.kde.Platform//6.9
+#   flatpak-builder --user --install --force-clean build-flatpak installer/flatpak/io.github.neoberent.Orbit.yml
+# (run from the repository root)
+app-id: io.github.neoberent.Orbit
+runtime: org.kde.Platform
+runtime-version: '6.9'
+sdk: org.kde.Sdk
+command: orbit
+rename-icon: orbit
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Where downloads go, including the folders "Sort into folders by type" uses.
+  - --filesystem=xdg-download
+  - --filesystem=xdg-videos
+  - --filesystem=xdg-music
+  - --filesystem=xdg-pictures
+  - --filesystem=xdg-documents
+  # Notifications with buttons, the tray icon, "Show in Folder".
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --talk-name=org.freedesktop.FileManager1
+  # Keeping the PC awake / sleeping when done, and metered-connection detection.
+  - --system-talk-name=org.freedesktop.login1
+  - --system-talk-name=org.freedesktop.NetworkManager
+cleanup:
+  - /include
+  - /lib/cmake
+  - /lib/pkgconfig
+  - '*.a'
+modules:
+  # libtorrent needs Boost's headers only (Asio and friends).
+  - name: boost
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/include && cp -r boost /app/include/
+    sources:
+      - type: archive
+        url: https://archives.boost.io/release/1.87.0/source/boost_1_87_0.tar.bz2
+        sha256: af57be25cb4c4f4b413ed692fe378affb4352ea50fbe294a11ef548f4d527d89
+
+  - name: libtorrent-rasterbar
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_SHARED_LIBS=ON
+      - -Dpython-bindings=OFF
+      - -Dboost_INCLUDE_DIR=/app/include
+    sources:
+      - type: git
+        url: https://github.com/arvidn/libtorrent.git
+        tag: v2.0.11
+
+  - name: orbit
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+    sources:
+      - type: dir
+        path: ../..
+    post-install:
+      - install -Dm644 src/ui/assets/logo.png /app/share/icons/hicolor/256x256/apps/orbit.png
+      - install -Dm644 installer/flatpak/io.github.neoberent.Orbit.desktop -t /app/share/applications
+      - install -Dm644 installer/flatpak/io.github.neoberent.Orbit.metainfo.xml -t /app/share/metainfo

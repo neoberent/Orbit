@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <system_error>
 #include <vector>
@@ -85,6 +86,14 @@ bool preallocateFile(const fs::path& path, std::uint64_t sizeBytes) {
     }
     return ok;
 #endif
+}
+
+std::string linuxPackaging() {
+#if defined(__linux__)
+    if (std::getenv("FLATPAK_ID") || fs::exists("/.flatpak-info")) return "flatpak";
+    if (std::getenv("APPIMAGE")) return "appimage";
+#endif
+    return {};
 }
 
 fs::path uniquePath(const fs::path& desired) {

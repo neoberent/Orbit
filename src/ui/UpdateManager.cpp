@@ -338,6 +338,13 @@ void UpdateManager::removeStaleInstallers() const {
 
 void UpdateManager::downloadUpdate() {
     if (!updateAvailable() || state_ == QLatin1String("downloading") || state_ == QLatin1String("checking")) return;
+#if defined(__linux__)
+    // A Flatpak updates through Flatpak, an AppImage by downloading the new AppImage.
+    if (!orbit::utils::linuxPackaging().empty()) {
+        openReleasePage();
+        return;
+    }
+#endif
     if (verifyCachedInstaller()) {
         setState(QStringLiteral("ready"));
         return;

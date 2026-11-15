@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.neoberent.Orbit</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Orbit</name>
+  <summary>Fast downloads, torrents and videos</summary>
+  <developer id="io.github.neoberent">
+    <name>Neo Berent</name>
+  </developer>
+  <description>
+    <p>Orbit downloads files over several connections at once, handles magnet links and
+    .torrent files, and saves videos and music from sites like YouTube.</p>
+    <ul>
+      <li>Steady multi-connection downloads that resume after a crash or restart</li>
+      <li>BitTorrent with magnet links, file selection and torrent RSS feeds</li>
+      <li>Checksums verified automatically when the server publishes one</li>
+      <li>Lock downloads to a VPN interface, pause on metered connections</li>
+      <li>A command line, a web dashboard and an aria2-compatible interface</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.neoberent.Orbit.desktop</launchable>
+  <url type="homepage">https://orbitdm.netlify.app/</url>
+  <url type="vcs-browser">https://github.com/neoberent/Orbit</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="3.2.0" date="2026-11-15"/>
+  </releases>
+</component>

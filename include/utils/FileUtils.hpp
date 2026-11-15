@@ -10,6 +10,11 @@ namespace orbit::utils {
 
 bool ensureDirectoryExists(const std::filesystem::path& dir);
 
+// How Orbit was packaged on Linux: "flatpak", "appimage", or "" for a normal install. A
+// sandboxed or self-mounting copy can't register itself with the desktop, install the
+// browser helper or update itself in place; its package manager or a new AppImage does.
+[[nodiscard]] std::string linuxPackaging();
+
 bool preallocateFile(const std::filesystem::path& path, std::uint64_t sizeBytes);
 
 std::filesystem::path uniquePath(const std::filesystem::path& desired);
