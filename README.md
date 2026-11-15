@@ -42,6 +42,16 @@ The code is split into two static libraries and the GUI:
   are enforced by a shared pacing limiter. Per-download settings (speed limit, connections)
   are saved with the task and survive a retry or restart. A resume whose file changed size
   on the server starts over instead of splicing two different files together.
+  Each connection fetches its whole part in one request (servers that limit requests per
+  client, such as speed-test and CDN hosts, answer a burst of small requests with 429), only
+  as many connections run at once as the server has shown it accepts, and that limit is
+  remembered for the host for 30 minutes. A crash-safe resume checkpoint is written every
+  15 s while downloading, a download that won't fit on the disk fails at once with the
+  space it needs (on Linux the space is reserved with `fallocate` when it starts), and
+  downloads that failed for network reasons are retried when the connection comes back.
+  Near the end, idle connections take over parts of the slowest one. A checksum the server
+  publishes (`Repr-Digest`, `Digest`, `x-goog-hash`, or a `.sha256`/`.sha512` file beside a
+  release download) is used to verify the finished file automatically.
 - **File already exists**: when a download's file name is taken, Orbit asks whether to
   replace the file or keep both (or does either automatically, set in Settings > Downloads).
   Another download's unfinished file is never replaced, and downloads starting at the same
@@ -64,10 +74,29 @@ The code is split into two static libraries and the GUI:
   sequential download, global and per-torrent rate limits, seeding limits by ratio or time,
   a maintained public-tracker fallback list merged into non-private torrents for wider peer
   discovery, and a persisted DHT routing table so peer discovery doesn't cold-start on every
-  launch.
+  launch. A finished torrent stops right away unless "Keep seeding after downloading" is on
+  (then the ratio and time limits apply).
 - **Proxy**: HTTP or SOCKS5 (with authentication) for direct downloads, torrents, yt-dlp and
   update checks. The password is encrypted with Windows DPAPI (on Linux, AES-256-GCM with a
   per-user key file readable only by you).
+- **Network interface lock** (Linux): bind every download (direct, torrent and media) to one
+  interface such as a VPN's `wg0` or `tun0`. While it's down nothing connects, so traffic never
+  falls back to the normal connection. Direct downloads look up host names as DNS over HTTPS
+  (Quad9, then Cloudflare, by IP) through that interface and never ask the system resolver;
+  the DHT's bootstrap routers are looked up the same way, and automatic update checks pause.
+  Torrent trackers and yt-dlp still use the system resolver.
+- **Per-network limits** (Linux): a download limit that applies only on the network you're
+  on (NetworkManager's name for it, e.g. a café's Wi-Fi), remembered per network.
+- **Metered connections** (Linux): downloads and seeding pause while NetworkManager reports the
+  connection as metered (a phone hotspot) and continue afterwards; the notification offers
+  "Download Anyway".
+- **Command line** (Linux): `orbit add <link|file.torrent> [-d folder] [-i links.txt]`,
+  `orbit list`, `orbit status`, `orbit pause|resume|cancel <id>|--all`, `orbit remove <id>`,
+  `orbit show`, all with `--json` where it makes sense. Adding starts Orbit in the tray if it
+  isn't running. Completions for bash, zsh and fish are installed with Orbit.
+- **Headless mode**: `orbit --headless` runs without any window or tray (no display needed),
+  controlled by the command line and the web dashboard; `orbit.service` runs it as a systemd
+  user service. `orbit --background` starts the normal app in the tray.
 - **Clipboard monitoring**: copied magnet links and links to files are offered for download
   from a small prompt by the notification area.
 - **Power**: keeps the PC awake while downloading (Windows power requests; on Linux the
@@ -101,6 +130,12 @@ The code is split into two static libraries and the GUI:
   (Ctrl/Shift/Ctrl+A) and bulk actions, a details pane with a live two-minute speed graph, a
   status bar with total throughput, grouped settings, dark and light themes, keyboard
   shortcuts, completion notifications and a tray icon with live status.
+- **Appearance**: dark, light or following the desktop (the settings portal's `color-scheme`
+  on Linux); eight accent colours or the desktop's own accent; comfortable or compact rows;
+  and on Linux a translucent window (blurred on KDE Plasma and Hyprland). A segmented
+  download's progress bar shows each connection filling its own part of the file, media
+  downloads show their video thumbnail and finished pictures a preview, and the tray icon
+  carries a progress ring while something downloads.
 
 ## Dependencies (Arch / CachyOS)
 
@@ -176,6 +211,8 @@ Everything the Windows build does works on Linux too; the platform pieces live i
 | Power requests, `SetSuspendState`, `ExitWindowsEx` | inhibit portal / logind `Inhibit`, logind `Suspend`/`Hibernate`/`PowerOff` |
 | DPAPI | AES-256-GCM, key in the data folder (`secret.key`, 0600) |
 | Explorer `/select` | `org.freedesktop.FileManager1.ShowItems` |
+| Tray balloons | `org.freedesktop.Notifications`, with Open / Show in Folder / Retry buttons where the server supports actions (`DesktopNotifications.cpp`) |
+| — | `orbit` command line over a second socket, `OrbitDownloadManager.Control`, that the browser helper can't reach (`CommandLine.cpp`) |
 | Clipboard listener | Qt, plus Klipper (Plasma) or `wl-paste --watch` for Wayland in the background |
 | Segoe UI | Inter, bundled (`src/ui/assets/fonts`, SIL OFL) |
 | Inno Setup installer + in-app update | `installer/linux/build-package.sh` → `OrbitSetup-<v>-linux.tar.gz` with `install.sh`; the in-app updater installs the `linux` entry of `updates.json` |
@@ -193,6 +230,12 @@ cmake --build build-linux
 installer/linux/install.sh            # install for this user
 installer/linux/build-package.sh      # release archive + size/SHA-256 for the website
 ```
+
+`install.sh` also installs the shell completions, `~/.config/systemd/user/orbit.service`
+(not enabled; `systemctl --user enable --now orbit` runs Orbit headless, and
+`loginctl enable-linger` keeps it running while you're logged out), and "Download with Orbit"
+for Dolphin and Files when they're installed (a `.torrent` is added, a text file is read as a
+list of links). They live in `installer/linux/share`.
 
 ## Windows build notes (this repository was built on Windows)
 

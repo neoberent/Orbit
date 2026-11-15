@@ -1,0 +1,40 @@
+#compdef orbit
+# zsh completion for orbit (Orbit Download Manager)
+
+_orbit_ids() {
+    local -a ids
+    ids=(${(f)"$(orbit list 2>/dev/null | awk 'NR > 1 && $1 ~ /^[0-9]+$/ {id=$1; st=$2; $1=$2=$3=$4=$5=""; sub(/^ +/, ""); print id ":" st " " $0}')"})
+    _describe 'download' ids
+}
+
+_orbit() {
+    local -a commands
+    commands=(
+        'add:Add downloads'
+        'list:Show every download'
+        'status:Totals and current speeds'
+        'pause:Pause downloads'
+        'resume:Resume downloads'
+        'cancel:Cancel downloads'
+        'remove:Remove downloads from the list'
+        'show:Open the window'
+        'help:Show help'
+    )
+    if (( CURRENT == 2 )); then
+        _describe 'command' commands
+        _arguments '--background[start in the tray]' '--headless[run without window or tray]' '--version[print the version]'
+        return
+    fi
+    case ${words[2]} in
+        add)
+            _arguments '(-d --dir)'{-d,--dir}'[save in this folder]:folder:_directories' \
+                       '(-i --input)'{-i,--input}'[add every link in this file]:file:_files' \
+                       '--checksum[verify when finished]:checksum:' '--json[print JSON]' \
+                       '*:link or torrent:_files -g "*.torrent"' ;;
+        pause|resume|cancel) _arguments '(-a --all)'{-a,--all}'[every download]' '*:download:_orbit_ids' ;;
+        remove|rm) _arguments '*:download:_orbit_ids' ;;
+        list|ls|status) _arguments '--json[print JSON]' ;;
+    esac
+}
+
+_orbit "$@"

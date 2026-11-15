@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Service
+MimeType=text/plain;text/uri-list;
+Actions=orbitAddLinks;
+
+[Desktop Action orbitAddLinks]
+Name=Download Links with Orbit
+Icon=orbit
+Exec=@ORBIT@ add --input %f

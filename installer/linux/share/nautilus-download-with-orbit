@@ -1,0 +1,11 @@
+#!/bin/sh
+# Nautilus (Files) script: right-click > Scripts > Download with Orbit. A .torrent is
+# added as is; any other file is read as a list of links, one per line.
+IFS='
+'
+for f in $NAUTILUS_SCRIPT_SELECTED_FILE_PATHS; do
+    case $f in
+        *.torrent) @ORBIT@ add "$f" ;;
+        *) @ORBIT@ add --input "$f" ;;
+    esac
+done

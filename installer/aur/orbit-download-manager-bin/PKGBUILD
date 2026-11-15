@@ -64,5 +64,17 @@ StartupNotify=true
 StartupWMClass=orbit
 DESKTOP
 
+    # Shell completions, the headless user service and "Download with Orbit" for Dolphin
+    # and Files (release archives from 3.2 on).
+    if [ -d share ]; then
+        install -Dm644 share/completions/orbit.bash "$pkgdir/usr/share/bash-completion/completions/orbit"
+        install -Dm644 share/completions/_orbit "$pkgdir/usr/share/zsh/site-functions/_orbit"
+        install -Dm644 share/completions/orbit.fish "$pkgdir/usr/share/fish/vendor_completions.d/orbit.fish"
+        sed 's|@ORBIT@|/usr/bin/orbit|g' share/orbit.service | install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/user/orbit.service"
+        for menu in orbit-torrent orbit-links; do
+            sed 's|@ORBIT@|/usr/bin/orbit|g' "share/$menu.desktop" | install -Dm755 /dev/stdin "$pkgdir/usr/share/kio/servicemenus/$menu.desktop"
+        done
+    fi
+
     install -Dm644 License.txt PrivacyPolicy.txt Inter-LICENSE.txt -t "$pkgdir/usr/share/licenses/$pkgname/"
 }

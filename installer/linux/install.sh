@@ -92,9 +92,40 @@ DESKTOP
 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database "$apps" >/dev/null 2>&1 || true; fi
 if command -v xdg-mime >/dev/null 2>&1; then xdg-mime default orbit.desktop x-scheme-handler/orbit 2>/dev/null || true; fi
 
+# Shell completions, the headless systemd service (not enabled) and "Download with Orbit"
+# in Dolphin and Files. The release archive has them in share/, a checkout in installer/linux/share.
+extras=$here/share
+if [ -d "$extras" ]; then
+    data=${XDG_DATA_HOME:-$HOME/.local/share}
+    config=${XDG_CONFIG_HOME:-$HOME/.config}
+    fill() { esc=$(printf '%s' "$2" | sed 's/[\\&|]/\\&/g'); sed "s|@ORBIT@|$esc|g" "$1"; }
+    mkdir -p "$data/bash-completion/completions" "$data/zsh/site-functions" "$config/systemd/user"
+    install -m 644 "$extras/completions/orbit.bash" "$data/bash-completion/completions/orbit"
+    install -m 644 "$extras/completions/_orbit" "$data/zsh/site-functions/_orbit"
+    if command -v fish >/dev/null 2>&1; then
+        mkdir -p "$config/fish/completions"
+        install -m 644 "$extras/completions/orbit.fish" "$config/fish/completions/orbit.fish"
+    fi
+    fill "$extras/orbit.service" "\"$dest/orbit\"" > "$config/systemd/user/orbit.service"
+    if command -v dolphin >/dev/null 2>&1; then
+        mkdir -p "$data/kio/servicemenus"
+        for menu in orbit-torrent orbit-links; do
+            fill "$extras/$menu.desktop" "\"$exec_path\"" > "$data/kio/servicemenus/$menu.desktop"
+            chmod 755 "$data/kio/servicemenus/$menu.desktop"
+        done
+    fi
+    if command -v nautilus >/dev/null 2>&1; then
+        mkdir -p "$data/nautilus/scripts"
+        fill "$extras/nautilus-download-with-orbit" "\"$dest/orbit\"" > "$data/nautilus/scripts/Download with Orbit"
+        chmod 755 "$data/nautilus/scripts/Download with Orbit"
+    fi
+    if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload >/dev/null 2>&1 || true; fi
+fi
+
 if ! command -v yt-dlp >/dev/null 2>&1 && [ ! -x "$dest/yt-dlp" ]; then
     echo "note: install yt-dlp and ffmpeg for YouTube/TikTok/Twitch downloads (Arch: sudo pacman -S yt-dlp ffmpeg)"
 fi
 
 echo "Orbit is installed. Start it from the application menu or run: orbit"
+echo "From a terminal: orbit add <link>, orbit list, orbit help. Headless: systemctl --user enable --now orbit"
 case ":$PATH:" in *":$bindir:"*) ;; *) echo "($bindir is not on your PATH; the menu entry works regardless)";; esac

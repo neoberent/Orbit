@@ -22,6 +22,12 @@ for dir in .mozilla .config/mozilla .librewolf .waterfox .floorp .zen; do
     rm -f "$HOME/$dir/native-messaging-hosts/com.orbit.downloadmanager.json"
 done
 
+if command -v systemctl >/dev/null 2>&1 && [ -f "$config/systemd/user/orbit.service" ]; then
+    systemctl --user disable --now orbit.service >/dev/null 2>&1 || true
+fi
+rm -f "$config/systemd/user/orbit.service" "$data/bash-completion/completions/orbit" "$data/zsh/site-functions/_orbit" \
+      "$config/fish/completions/orbit.fish" "$data/kio/servicemenus/orbit-torrent.desktop" \
+      "$data/kio/servicemenus/orbit-links.desktop" "$data/nautilus/scripts/Download with Orbit"
 rm -f "$data/applications/orbit.desktop" "$data/icons/hicolor/256x256/apps/orbit.png"
 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database "$data/applications" >/dev/null 2>&1 || true; fi
 if [ "$(readlink "$HOME/.local/bin/orbit" 2>/dev/null)" = "$dest/orbit" ]; then rm -f "$HOME/.local/bin/orbit"; fi

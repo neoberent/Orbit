@@ -27,6 +27,7 @@ install -m 755 "$root/installer/linux/install.sh" "$root/installer/linux/uninsta
 install -m 644 "$root/installer/License.txt" "$root/installer/PrivacyPolicy.txt" "$stage/"
 install -m 644 "$root/src/ui/assets/logo.png" "$stage/orbit.png"
 install -m 644 "$root/src/ui/assets/fonts/Inter-LICENSE.txt" "$stage/"
+cp -R "$root/installer/linux/share" "$stage/share"
 
 out=$root/installer/Output
 mkdir -p "$out"

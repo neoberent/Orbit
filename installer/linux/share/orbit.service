@@ -1,0 +1,23 @@
+# Runs Orbit without a window, for a home server or NAS: control it with the `orbit`
+# command or the web dashboard (Settings > Remote in the app, or remote/* in the config).
+#
+#   systemctl --user enable --now orbit
+#   loginctl enable-linger "$USER"     # keep it running while you're logged out
+#
+# Stop it before opening the normal Orbit window: only one Orbit runs at a time.
+[Unit]
+Description=Orbit Download Manager (headless)
+Documentation=https://github.com/neoberent/Orbit
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@ORBIT@ --headless
+Restart=on-failure
+RestartSec=5
+# SIGTERM saves torrent resume data and the download list before Orbit exits.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
