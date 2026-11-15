@@ -5,17 +5,57 @@ QtObject {
     id: theme
 
     property bool dark: true
+    // Set from Prefs in main.qml: the accent colour, a see-through window (Linux, where
+    // the compositor blurs what's behind it), and the denser list layout.
+    property color accentBase: "#5b6ef2"
+    property bool translucent: false
+    property bool compactRows: false
+
+    // The accents on offer. Each keeps white text readable on top of it.
+    readonly property var accentPalette: [
+        { key: "indigo", label: "Indigo", color: "#5b6ef2" },
+        { key: "blue", label: "Blue", color: "#3b82f6" },
+        { key: "teal", label: "Teal", color: "#0f9f8f" },
+        { key: "green", label: "Green", color: "#2f9e5f" },
+        { key: "amber", label: "Amber", color: "#c7841a" },
+        { key: "rose", label: "Rose", color: "#d9466f" },
+        { key: "violet", label: "Violet", color: "#8b5cf6" },
+        { key: "graphite", label: "Graphite", color: "#6b7280" }
+    ]
+
+    function accentFor(key, systemColor) {
+        if (key === "system" && systemColor !== undefined && systemColor.a > 0) return readableAccent(systemColor)
+        for (const entry of accentPalette) if (entry.key === key) return entry.color
+        return accentPalette[0].color
+    }
+
+    // A desktop accent can be anything; very light ones are darkened until white text on
+    // them stays legible.
+    function readableAccent(c) {
+        let color = c
+        for (let i = 0; i < 6 && luminance(color) > 0.42; ++i) color = Qt.darker(color, 1.15)
+        return color
+    }
+
+    function luminance(c) {
+        const f = (v) => v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
+        return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
+    }
 
     // For the few texts that name the operating system or Orbit's program file.
     readonly property bool windows: Qt.platform.os === "windows"
     readonly property string osName: windows ? "Windows" : "Linux"
     readonly property string exeName: windows ? "orbit.exe" : "orbit"
 
-    readonly property color canvas: dark ? "#09090c" : "#eceef1"
-    readonly property color background: dark ? "#0e0e12" : "#f6f7f9"
-    readonly property color sidebar: dark ? "#0a0a0d" : "#eceef1"
+    // In the translucent look the window's own surfaces let the desktop show through a
+    // little; panels, rows and dialogs stay solid so text keeps its contrast.
+    readonly property color canvas: translucent ? "transparent" : (dark ? "#09090c" : "#eceef1")
+    readonly property color backgroundSolid: dark ? "#0e0e12" : "#f6f7f9"
+    readonly property color sidebarSolid: dark ? "#0a0a0d" : "#eceef1"
+    readonly property color background: withAlpha(backgroundSolid, translucent ? 0.86 : 1)
+    readonly property color sidebar: withAlpha(sidebarSolid, translucent ? 0.74 : 1)
     readonly property color sidebarBottom: sidebar
-    readonly property color topBar: dark ? "#0e0e12" : "#f6f7f9"
+    readonly property color topBar: background
     readonly property color surface: dark ? "#15151a" : "#ffffff"
     readonly property color surfaceElevated: dark ? "#19191f" : "#ffffff"
     readonly property color surfaceHover: dark ? "#1c1c23" : "#f0f1f4"
@@ -25,8 +65,10 @@ QtObject {
     readonly property color panel: dark ? "#121217" : "#fbfbfc"
     readonly property color headerStrip: dark ? "#111116" : "#f1f2f5"
     readonly property color rowHover: dark ? "#16161c" : "#f3f4f7"
-    readonly property color rowSelected: dark ? "#181a26" : "#e9ecfb"
-    readonly property color statusBar: dark ? "#0a0a0d" : "#eceef1"
+    // A hint of the accent, so the selection follows whichever accent is chosen.
+    readonly property color rowSelectedBase: dark ? "#16161c" : "#ffffff"
+    readonly property color rowSelected: Qt.tint(rowSelectedBase, withAlpha(accentBase, dark ? 0.10 : 0.11))
+    readonly property color statusBar: sidebar
 
     readonly property color border: dark ? "#212128" : "#e1e3e8"
     readonly property color borderSoft: dark ? "#19191f" : "#eceef1"
@@ -41,9 +83,9 @@ QtObject {
     readonly property color textDisabled: dark ? "#4a4a53" : "#b3b3ba"
 
     // Single, controlled accent. No two-stop rainbow gradients on interactive chrome.
-    readonly property color accent: "#5b6ef2"
-    readonly property color accentHover: "#6c7ef5"
-    readonly property color accentPressed: "#4c5edb"
+    readonly property color accent: accentBase
+    readonly property color accentHover: Qt.lighter(accentBase, 1.09)
+    readonly property color accentPressed: Qt.darker(accentBase, 1.12)
     readonly property color accentInk: "#ffffff"
     readonly property color accent2: "#a179e8"
     readonly property color success: "#3fbf83"
@@ -81,7 +123,8 @@ QtObject {
     readonly property real headerHeight: 56
     readonly property real sidebarWidth: 220
     readonly property real columnHeaderHeight: 30
-    readonly property real rowHeight: 60
+    readonly property real rowHeight: compactRows ? 44 : 60
+    readonly property real fileTileSize: compactRows ? 26 : 34
     readonly property real statusBarHeight: 28
 
     readonly property int fontTitle: 18

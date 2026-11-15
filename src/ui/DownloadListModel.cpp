@@ -2,6 +2,7 @@
 
 #include "core/MediaDownloader.hpp"
 #include "core/TorrentEngine.hpp"
+#include "utils/FileUtils.hpp"
 #include "utils/Hashing.hpp"
 #include "utils/StringUtils.hpp"
 
@@ -207,6 +208,19 @@ QVariant DownloadListModel::data(const QModelIndex& index, int role) const {
         case HasBrowserSessionRole: return snap.options.hasBrowserSession;
         case DestinationDirRole: return QDir::toNativeSeparators(QString::fromStdString(snap.options.destinationDir));
         case FileConflictPathRole: return QDir::toNativeSeparators(QString::fromStdString(snap.fileConflictPath));
+        case SegmentsRole: {
+            // [start, done, start, done, ...] as fractions of the file, one pair per connection.
+            QVariantList list;
+            const auto total = static_cast<double>(snap.stats.totalBytes);
+            const bool showing = snap.state == DownloadState::Downloading || snap.state == DownloadState::Paused;
+            if (!showing || total <= 0 || snap.stats.segments.size() < 2) return list;
+            list.reserve(static_cast<qsizetype>(snap.stats.segments.size() * 2));
+            for (const auto& seg : snap.stats.segments) {
+                list << static_cast<double>(seg.start) / total << static_cast<double>(seg.done) / total;
+            }
+            return list;
+        }
+        case ThumbnailRole: return thumbnailFor(snap);
         case CanRefreshLinkRole:
             return snap.type == DownloadType::Http && snap.fileConflictPath.empty() &&
                    (snap.state == DownloadState::Paused || snap.state == DownloadState::Error ||
@@ -259,6 +273,8 @@ QHash<int, QByteArray> DownloadListModel::roleNames() const {
         {DestinationDirRole, "destinationDir"},
         {FileConflictPathRole, "fileConflictPath"},
         {CanRefreshLinkRole, "canRefreshLink"},
+        {SegmentsRole, "segments"},
+        {ThumbnailRole, "thumbnail"},
     };
 }
 
@@ -365,7 +381,14 @@ QVariantMap DownloadListModel::summary() const {
     double downRate = 0;
     double upRate = 0;
     int active = 0, queued = 0, paused = 0, completed = 0, errors = 0, seeding = 0, finished = 0;
+    // Overall progress of what's downloading now, for the tray icon's ring.
+    double activeDone = 0;
+    double activeTotal = 0;
     for (const TaskSnapshot& s : items_) {
+        if ((s.state == DownloadState::Downloading || s.state == DownloadState::Connecting) && s.stats.totalBytes > 0) {
+            activeDone += static_cast<double>(std::min(s.stats.bytesDownloaded, s.stats.totalBytes));
+            activeTotal += static_cast<double>(s.stats.totalBytes);
+        }
         switch (s.state) {
             case DownloadState::Downloading:
             case DownloadState::Connecting: ++active; downRate += s.stats.downloadRateBytesPerSec; break;
@@ -392,6 +415,7 @@ QVariantMap DownloadListModel::summary() const {
     result["errors"] = errors;
     result["seeding"] = seeding;
     result["finished"] = finished;
+    result["activeProgress"] = activeTotal > 0 ? activeDone / activeTotal : -1.0;
     return result;
 }
 
@@ -679,7 +703,45 @@ QVariantList DownloadListModel::pendingFileConflicts() const {
     return ids;
 }
 
+QString DownloadListModel::thumbnailDir() {
+    return QString::fromStdWString((orbit::utils::appDataDir() / "thumbnails").wstring());
+}
+
+QString DownloadListModel::thumbnailFor(const TaskSnapshot& snap) const {
+    const auto id = static_cast<qlonglong>(snap.id);
+    if (snap.type == DownloadType::Media) {
+        if (const auto it = thumbnails_.constFind(id); it != thumbnails_.constEnd()) return it.value();
+        const int state = static_cast<int>(snap.state);
+        if (thumbnailCheckedState_.value(id, -1) == state) return {};
+        thumbnailCheckedState_.insert(id, state);
+        for (const char* ext : {"jpg", "png", "webp"}) {
+            const QString path = thumbnailDir() + QStringLiteral("/%1.%2").arg(id).arg(QLatin1String(ext));
+            if (QFileInfo::exists(path)) {
+                const QString url = QUrl::fromLocalFile(path).toString();
+                thumbnails_.insert(id, url);
+                return url;
+            }
+        }
+        return {};
+    }
+    if (snap.state != DownloadState::Completed || snap.destinationPath.empty()) return {};
+    static const QStringList pictures{QStringLiteral("png"), QStringLiteral("jpg"), QStringLiteral("jpeg"),
+                                      QStringLiteral("gif"), QStringLiteral("webp"), QStringLiteral("bmp")};
+    const QString path = QString::fromStdString(snap.destinationPath);
+    if (!pictures.contains(QFileInfo(path).suffix().toLower())) return {};
+    // Decoding a huge picture for a 34-pixel tile isn't worth it.
+    if (snap.stats.totalBytes > 40ull * 1024 * 1024) return {};
+    return QUrl::fromLocalFile(path).toString();
+}
+
 void DownloadListModel::applyRemoval(DownloadId id) {
+    const auto key = static_cast<qlonglong>(id);
+    thumbnails_.remove(key);
+    thumbnailCheckedState_.remove(key);
+    for (const char* ext : {"jpg", "png", "webp"}) {
+        QFile::remove(thumbnailDir() + QStringLiteral("/%1.%2").arg(key).arg(QLatin1String(ext)));
+    }
+
     auto it = std::find_if(items_.begin(), items_.end(), [&](const TaskSnapshot& s) { return s.id == id; });
     if (it == items_.end()) return;
     const int row = static_cast<int>(std::distance(items_.begin(), it));

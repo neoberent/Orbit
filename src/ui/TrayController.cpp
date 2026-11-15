@@ -1,22 +1,62 @@
 #include "TrayController.hpp"
 
 #include "utils/Logger.hpp"
+#if defined(__linux__)
+#include "DesktopNotifications.hpp"
+#endif
 
 #include <QAction>
 #include <QActionGroup>
 #include <QIcon>
 #include <QMenu>
+#include <QPainter>
+#include <QPixmap>
+
+#include <algorithm>
 #include <QGuiApplication>
+#include <QMetaObject>
 #include <QQuickWindow>
 #include <QScreen>
 #include <QSystemTrayIcon>
+#include <QTimer>
 
-TrayController::TrayController(QObject* parent) : QObject(parent) {
-    buildTrayIcon();
+TrayController::TrayController(bool showIcon, QObject* parent) : QObject(parent) {
+    if (showIcon) buildTrayIcon();
+#if defined(__linux__)
+    desktopNotifications_ = new DesktopNotifications(this);
+    connect(desktopNotifications_, &DesktopNotifications::actionInvoked, this,
+            [this](const QString& tag, const QString& key) {
+                if (key == QLatin1String("default")) {
+                    showAndRaise();
+                    return;
+                }
+                if (tag == QLatin1String("metered")) {
+                    if (key == QLatin1String("resume")) emit meteredResumeRequested();
+                    return;
+                }
+                bool ok = false;
+                const qlonglong id = tag.toLongLong(&ok);
+                if (ok && id > 0) emit downloadActionRequested(id, key);
+            });
+#endif
+}
+
+// Through the desktop's notification server where there is one (it knows the app from
+// orbit.desktop and can carry buttons), otherwise as a balloon from the tray icon.
+void TrayController::showMessage(const QString& title, const QString& message, bool warning, int timeoutMs) {
+#if defined(__linux__)
+    if (desktopNotifications_ && desktopNotifications_->available()) {
+        desktopNotifications_->notify(title, message, warning, {}, {}, {});
+        return;
+    }
+#endif
+    if (!trayIcon_) return;
+    trayIcon_->showMessage(title, message, warning ? QSystemTrayIcon::Warning : QSystemTrayIcon::Information, timeoutMs);
 }
 
 void TrayController::buildTrayIcon() {
-    trayIcon_ = new QSystemTrayIcon(QIcon(QStringLiteral(":/images/logo.png")), this);
+    baseIcon_ = QIcon(QStringLiteral(":/images/logo.png"));
+    trayIcon_ = new QSystemTrayIcon(baseIcon_, this);
     trayIcon_->setToolTip(QStringLiteral("Orbit Download Manager"));
 
     auto* menu = new QMenu();
@@ -73,16 +113,25 @@ void TrayController::hideToTray() {
     window_->hide();
 
     if (!hasShownTrayHint_ && trayIcon_) {
-        trayIcon_->showMessage(
-            QStringLiteral("Orbit is still running"),
-            QStringLiteral("Downloads keep going in the background. Click the tray icon to reopen Orbit."),
-            QSystemTrayIcon::Information, 4000);
+        showMessage(QStringLiteral("Orbit is still running"),
+                    QStringLiteral("Downloads keep going in the background. Click the tray icon to reopen Orbit."),
+                    false, 4000);
         hasShownTrayHint_ = true;
     }
 }
 
 void TrayController::showAndRaise() {
     if (!window_) return;
+    // A notification's focus token is good for this one raise; programs Orbit starts
+    // later (a video player, the file manager) mustn't inherit it.
+    if (qEnvironmentVariableIsSet("XDG_ACTIVATION_TOKEN")) {
+        QTimer::singleShot(1000, this, [] { qunsetenv("XDG_ACTIVATION_TOKEN"); });
+    }
+    if (!window_->property("revealed").toBool()) {
+        // Started in the tray: the first showing plays the opening animation.
+        QMetaObject::invokeMethod(window_, "reveal");
+        return;
+    }
     window_->showNormal();
     window_->raise();
     window_->requestActivate();
@@ -90,8 +139,80 @@ void TrayController::showAndRaise() {
 
 void TrayController::notify(const QString& title, const QString& message, bool warning) {
     ORBIT_LOG_INFO("tray", "Notification: " + title.toStdString() + " - " + message.toStdString());
+    showMessage(title, message, warning, 5000);
+}
+
+void TrayController::notifyTransfer(qlonglong id, const QString& title, const QString& message, bool success) {
+    ORBIT_LOG_INFO("tray", "Notification: " + title.toStdString() + " - " + message.toStdString());
+#if defined(__linux__)
+    if (desktopNotifications_ && desktopNotifications_->available()) {
+        QList<DesktopNotifications::Action> actions;
+        if (success) {
+            actions << DesktopNotifications::Action{QStringLiteral("open"), QStringLiteral("Open")}
+                    << DesktopNotifications::Action{QStringLiteral("reveal"), QStringLiteral("Show in Folder")};
+        } else {
+            actions << DesktopNotifications::Action{QStringLiteral("retry"), QStringLiteral("Retry")};
+        }
+        desktopNotifications_->notify(title, message, !success,
+                                      success ? QStringLiteral("transfer.complete") : QStringLiteral("transfer.error"),
+                                      actions, QString::number(id));
+        return;
+    }
+#else
+    Q_UNUSED(id)
+#endif
+    showMessage(title, message, !success, 5000);
+}
+
+void TrayController::notifyMetered(int count) {
+    const QString title = QStringLiteral("Paused on a metered connection");
+    const QString message = count == 1 ? QStringLiteral("1 download will continue once you're off this connection.")
+                                       : QStringLiteral("%1 downloads will continue once you're off this connection.").arg(count);
+    ORBIT_LOG_INFO("tray", "Notification: " + title.toStdString());
+#if defined(__linux__)
+    if (desktopNotifications_ && desktopNotifications_->available()) {
+        desktopNotifications_->notify(title, message, false, QStringLiteral("network"),
+                                      {DesktopNotifications::Action{QStringLiteral("resume"), QStringLiteral("Download Anyway")}},
+                                      QStringLiteral("metered"));
+        return;
+    }
+#endif
+    showMessage(title, message, false, 6000);
+}
+
+void TrayController::setProgress(double progress, const QColor& color) {
     if (!trayIcon_) return;
-    trayIcon_->showMessage(title, message, warning ? QSystemTrayIcon::Warning : QSystemTrayIcon::Information, 5000);
+    // 2% steps: smooth enough to watch, without redrawing the icon every second.
+    const int step = progress < 0 ? -1 : static_cast<int>(std::clamp(progress, 0.0, 1.0) * 50.0 + 0.5);
+    if (step == shownProgressStep_ && color == shownProgressColor_) return;
+    shownProgressStep_ = step;
+    shownProgressColor_ = color;
+    if (step < 0) {
+        trayIcon_->setIcon(baseIcon_);
+        return;
+    }
+
+    // Drawn large so trays on HiDPI screens scale it down rather than up.
+    constexpr int kSize = 128;
+    QPixmap canvas(kSize, kSize);
+    canvas.fill(Qt::transparent);
+    QPainter painter(&canvas);
+    painter.setRenderHint(QPainter::Antialiasing);
+    // The logo shrinks a little to make room for the ring around it.
+    constexpr int kRing = 9;
+    constexpr int kInset = kRing + 3;
+    const QRect logoRect(kInset, kInset, kSize - 2 * kInset, kSize - 2 * kInset);
+    painter.drawPixmap(logoRect, baseIcon_.pixmap(logoRect.size() * 2));
+    const QRectF ringRect(kRing / 2.0 + 0.5, kRing / 2.0 + 0.5, kSize - kRing - 1, kSize - kRing - 1);
+    QPen track(QColor(128, 128, 128, 80), kRing);
+    painter.setPen(track);
+    painter.drawEllipse(ringRect);
+    QPen fill(color.isValid() ? color : QColor(0x5b, 0x6e, 0xf2), kRing, Qt::SolidLine, Qt::RoundCap);
+    painter.setPen(fill);
+    // Clockwise from twelve o'clock (Qt's angles run counter-clockwise in 1/16 degrees).
+    painter.drawArc(ringRect, 90 * 16, -static_cast<int>(step / 50.0 * 360.0 * 16));
+    painter.end();
+    trayIcon_->setIcon(QIcon(canvas));
 }
 
 void TrayController::setStatus(const QString& tooltip, bool canPause, bool canResume) {
@@ -117,7 +238,5 @@ QPoint TrayController::cornerPosition(int width, int height) const {
 }
 
 void TrayController::notifyDownloadAdded(const QString& label) {
-    if (!trayIcon_) return;
-    trayIcon_->showMessage(QStringLiteral("Download added from browser"), label,
-                            QSystemTrayIcon::Information, 3500);
+    showMessage(QStringLiteral("Download added from browser"), label, false, 3500);
 }

@@ -20,7 +20,7 @@ Dialog {
     readonly property var pages: [
         { label: "General", icon: "settings", title: "General", description: "Appearance, notifications, power and the clipboard" },
         { label: "Downloads", icon: "downloading", title: "Downloads", description: "Where files go, connections, and bandwidth" },
-        { label: "Network", icon: "network", title: "Network", description: "Send Orbit's traffic through a proxy" },
+        { label: "Network", icon: "network", title: "Network", description: "Proxy, VPN interface and metered connections" },
         { label: "BitTorrent", icon: "torrent", title: "BitTorrent", description: "Torrent speed limits and when to stop seeding" },
         { label: "Media", icon: "media", title: "Media", description: "Sign-in for video sites, and keeping yt-dlp up to date" },
         { label: "Browser", icon: "extension", title: "Browser Integration", description: "Hand downloads from your browser to Orbit" },

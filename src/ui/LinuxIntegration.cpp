@@ -3,6 +3,7 @@
 #include "utils/FileUtils.hpp"
 #include "utils/Logger.hpp"
 
+#include <QGuiApplication>
 #include <QDBusConnection>
 #include <QDBusInterface>
 #include <QDBusMessage>
@@ -21,9 +22,12 @@
 #include <QUrl>
 #include <QVariantMap>
 
+#include <xcb/xcb.h>
+
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
+#include <cstdlib>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -214,6 +218,23 @@ bool revealInFileManager(const QString& filePath) {
         watcher->deleteLater();
     });
     return true;
+}
+
+void setBlurBehind(quintptr windowId, bool enabled) {
+    auto* x11 = qGuiApp ? qGuiApp->nativeInterface<QNativeInterface::QX11Application>() : nullptr;
+    if (!x11 || windowId == 0) return;  // Not on X11 (or XWayland): nothing to set.
+    xcb_connection_t* connection = x11->connection();
+    static const char kName[] = "_KDE_NET_WM_BLUR_BEHIND_REGION";
+    xcb_intern_atom_reply_t* reply =
+        xcb_intern_atom_reply(connection, xcb_intern_atom(connection, 0, sizeof(kName) - 1, kName), nullptr);
+    if (!reply) return;
+    const xcb_atom_t atom = reply->atom;
+    std::free(reply);
+    const auto window = static_cast<xcb_window_t>(windowId);
+    // An empty region means "the whole window".
+    if (enabled) xcb_change_property(connection, XCB_PROP_MODE_REPLACE, window, atom, XCB_ATOM_CARDINAL, 32, 0, nullptr);
+    else xcb_delete_property(connection, window, atom);
+    xcb_flush(connection);
 }
 
 void registerDesktopEntry(const QString& executablePath) {

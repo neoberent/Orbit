@@ -20,7 +20,7 @@ Item {
     readonly property bool hovered: hover.hovered
     readonly property bool finished: stateLabel === "Completed" || stateLabel === "Cancelled"
     readonly property bool failed: stateLabel === "Error"
-    readonly property bool showBar: !finished && stateLabel !== "Seeding" && !(failed && progress <= 0)
+    readonly property bool showBar: !finished && stateLabel !== "Seeding" && stateLabel !== "Queued" && !(failed && progress <= 0)
     readonly property color tone: Theme.stateColor(stateLabel)
     readonly property string kind: Theme.fileKind(name, isTorrent, isMedia)
     readonly property string extension: Theme.fileExtension(name).toUpperCase()
@@ -68,6 +68,26 @@ Item {
         Behavior on color { ColorAnimation { duration: Theme.animFast } }
     }
 
+    // A brief, soft wash of green when this download finishes while it's on screen.
+    readonly property string currentState: stateLabel
+    property string previousState: stateLabel
+    onCurrentStateChanged: {
+        if (currentState === "Completed" && (previousState === "Downloading" || previousState === "Connecting")) finishPulse.restart()
+        previousState = currentState
+    }
+
+    Rectangle {
+        id: finishWash
+        anchors.fill: parent
+        color: Theme.success
+        opacity: 0
+        SequentialAnimation {
+            id: finishPulse
+            NumberAnimation { target: finishWash; property: "opacity"; to: 0.10; duration: Theme.animNormal; easing.type: Theme.easeStandard }
+            NumberAnimation { target: finishWash; property: "opacity"; to: 0; duration: 900; easing.type: Easing.InOutQuad }
+        }
+    }
+
     Rectangle {
         anchors.left: parent.left
         anchors.top: parent.top
@@ -108,10 +128,12 @@ Item {
 
         FileTile {
             Layout.alignment: Qt.AlignVCenter
-            Layout.rightMargin: 12
+            Layout.rightMargin: Theme.compactRows ? 10 : 12
+            size: Theme.fileTileSize
             fileName: model.name
             isTorrent: model.isTorrent
             isMedia: model.isMedia
+            thumbnail: model.thumbnail
             muted: model.stateLabel === "Cancelled"
         }
 
@@ -194,9 +216,9 @@ Item {
                         text: root.finished || stateLabel === "Seeding"
                               ? (stateLabel === "Cancelled" ? "Cancelled at " + root.percentText : (root.sizeKnown ? totalText : downloadedText))
                               : root.progressDetail
-                        color: root.finished || stateLabel === "Seeding" ? Theme.textPrimary : Theme.textSecondary
+                        color: Theme.textSecondary
                         font.pixelSize: root.finished || stateLabel === "Seeding" ? Theme.fontBody : Theme.fontCaption
-                        font.weight: root.finished || stateLabel === "Seeding" ? Font.Medium : Font.Normal
+                        font.features: { "tnum": 1 }
                         elide: Text.ElideRight
                     }
                     Text {
@@ -218,9 +240,10 @@ Item {
             spacing: 2
 
             Text {
-                text: stateLabel === "Seeding" ? (uploadSpeedText !== "--" ? "↑ " + uploadSpeedText : "—")
-                      : (speedText !== "--" && stateLabel === "Downloading" ? speedText : "—")
-                color: text === "—" ? Theme.textDisabled : Theme.textPrimary
+                // Idle rows leave the column empty rather than filling it with dashes.
+                text: stateLabel === "Seeding" ? (uploadSpeedText !== "--" ? "↑ " + uploadSpeedText : "")
+                      : (speedText !== "--" && stateLabel === "Downloading" ? speedText : "")
+                color: Theme.textPrimary
                 font.pixelSize: Theme.fontBody
                 font.weight: Font.Medium
                 font.features: { "tnum": 1 }
@@ -245,8 +268,8 @@ Item {
             readonly property bool showDate: (stateLabel === "Completed" || stateLabel === "Seeding") && dateText.length > 0
 
             Text {
-                text: parent.showEta ? etaText : (parent.showDate ? dateText : "—")
-                color: text === "—" ? Theme.textDisabled : Theme.textPrimary
+                text: parent.showEta ? etaText : (parent.showDate ? dateText : "")
+                color: parent.showDate ? Theme.textSecondary : Theme.textPrimary
                 font.pixelSize: Theme.fontBody
                 font.weight: Font.Medium
                 font.features: { "tnum": 1 }
@@ -278,7 +301,10 @@ Item {
             Layout.alignment: Qt.AlignVCenter
             layoutDirection: Qt.RightToLeft
             spacing: 2
-            opacity: root.hovered || root.selected ? 1.0 : 0.45
+            // Only the row under the pointer (or selected) shows its buttons.
+            // They keep their space so the columns stay aligned, and can't be clicked unseen.
+            opacity: root.hovered || root.selected ? 1.0 : 0.0
+            enabled: root.hovered || root.selected
             Behavior on opacity { NumberAnimation { duration: Theme.animNormal; easing.type: Theme.easeStandard } }
 
             IconButton {

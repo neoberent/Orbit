@@ -12,7 +12,24 @@ ApplicationWindow {
     title: "Orbit Download Manager"
     color: Theme.canvas
 
-    Binding { target: Theme; property: "dark"; value: appController.darkTheme }
+    // Light or dark: chosen in Settings, or following the desktop. The effective choice is
+    // handed to appController too, which styles the native window frame from it.
+    readonly property bool effectiveDark: Prefs.themeMode === "system"
+                                          ? (systemAppearance.colorScheme === "" ? appController.darkTheme : systemAppearance.colorScheme === "dark")
+                                          : Prefs.themeMode === "light" ? false
+                                          : Prefs.themeMode === "dark" ? true
+                                          : appController.darkTheme
+    onEffectiveDarkChanged: if (appController.darkTheme !== effectiveDark) appController.darkTheme = effectiveDark
+    Binding { target: Theme; property: "dark"; value: window.effectiveDark }
+    Binding {
+        target: Theme; property: "accentBase"
+        value: Theme.accentFor(Prefs.accent, systemAppearance.hasAccentColor ? systemAppearance.accentColor : undefined)
+    }
+    Binding { target: Theme; property: "compactRows"; value: Prefs.density === "compact" }
+    Binding { target: Theme; property: "translucent"; value: Prefs.translucent && !Theme.windows }
+    // Asks KDE Plasma's compositor to blur what's behind the window (others ignore it).
+    readonly property bool blurWanted: Theme.translucent && visible
+    onBlurWantedChanged: appController.setBlurBehind(window, blurWanted)
 
     onClosing: (close) => {
         close.accepted = false
@@ -37,6 +54,7 @@ ApplicationWindow {
     Timer { id: geometryTimer; interval: 400; onTriggered: window.rememberGeometry() }
 
     Component.onCompleted: {
+        if (Prefs.themeMode === "") Prefs.themeMode = appController.darkTheme ? "dark" : "light"
         const sx = Prefs.windowX, sy = Prefs.windowY
         if (sx >= 0 && sy >= 0 && sx < Screen.desktopAvailableWidth - 100 && sy < Screen.desktopAvailableHeight - 100) {
             x = sx
@@ -44,7 +62,11 @@ ApplicationWindow {
         }
     }
 
+    // False until the window was first shown (Orbit can start in the tray or headless).
+    property bool revealed: false
+
     function reveal() {
+        revealed = true
         showNormal()
         raise()
         requestActivate()
@@ -70,6 +92,7 @@ ApplicationWindow {
             if (s.seeding > 0) parts.push(s.seeding + " seeding")
             if (s.queued > 0) parts.push(s.queued + " queued")
             const rates = s.downloading || s.uploading ? "\n↓ " + s.downloadRateText + "   ↑ " + s.uploadRateText : ""
+            trayController.setProgress(s.active > 0 ? s.activeProgress : -1, Theme.accent)
             trayController.setStatus("Orbit" + (parts.length ? " — " + parts.join(", ") : "") + rates,
                                      s.active + s.seeding > 0, s.paused > 0)
         }
@@ -79,14 +102,26 @@ ApplicationWindow {
         target: trayController
         function onPauseAllRequested() { downloadModel.pauseAll() }
         function onResumeAllRequested() { downloadModel.resumeAll() }
+        function onDownloadActionRequested(id, action) {
+            const item = downloadModel.get(id)
+            if (item.taskId === undefined) return
+            if (action === "open") {
+                if (!downloadModel.openFile(id)) downloadModel.openContainingFolder(id)
+            } else if (action === "reveal") {
+                appController.revealFile(item.destination)
+            } else if (action === "retry") {
+                if (item.stateLabel === "Error" || item.stateLabel === "Cancelled" || item.isPaused)
+                    downloadModel.resumeItem(id)
+            }
+        }
     }
 
     Connections {
         target: downloadModel
         function onTransferFinished(id, name, success, detail) {
             if (!Prefs.notifyOnFinish || (window.visible && window.active)) return
-            if (success) trayController.notify("Download complete", name, false)
-            else trayController.notify("Download failed", name + (detail.length > 0 ? "\n" + detail : ""), true)
+            if (success) trayController.notifyTransfer(id, "Download complete", name, true)
+            else trayController.notifyTransfer(id, "Download failed", name + (detail.length > 0 ? "\n" + detail : ""), false)
         }
         function onFileConflict(id, name) {
             fileConflictDialog.enqueue(id)

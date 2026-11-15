@@ -10,6 +10,10 @@
 #include <QVariantMap>
 
 #include <memory>
+#include <unordered_map>
+#include <vector>
+
+class QTimer;
 
 namespace orbit::core {
 class RemoteServer;
@@ -59,6 +63,7 @@ class MainWindow final : public QObject {
     Q_PROPERTY(int torrentUploadLimitKBps READ torrentUploadLimitKBps WRITE setTorrentUploadLimitKBps NOTIFY torrentSettingsChanged)
     Q_PROPERTY(double seedRatioLimit READ seedRatioLimit WRITE setSeedRatioLimit NOTIFY torrentSettingsChanged)
     Q_PROPERTY(int seedTimeLimitMinutes READ seedTimeLimitMinutes WRITE setSeedTimeLimitMinutes NOTIFY torrentSettingsChanged)
+    Q_PROPERTY(bool seedAfterDownload READ seedAfterDownload WRITE setSeedAfterDownload NOTIFY torrentSettingsChanged)
 
     Q_PROPERTY(QString mediaCookiesBrowser READ mediaCookiesBrowser WRITE setMediaCookiesBrowser NOTIFY mediaSettingsChanged)
 
@@ -68,6 +73,18 @@ class MainWindow final : public QObject {
     Q_PROPERTY(QString chromeExtensionId READ chromeExtensionId CONSTANT)
 
     Q_PROPERTY(bool portable READ portable CONSTANT)
+
+    // The network interface every download is bound to ("" = any), e.g. a VPN's wg0.
+    Q_PROPERTY(QString networkInterface READ networkInterface WRITE setNetworkInterface NOTIFY networkInterfaceChanged)
+    // Pauses downloads and seeding while the connection is metered (a phone hotspot, a
+    // capped mobile plan), and resumes them once it isn't.
+    Q_PROPERTY(bool pauseOnMetered READ pauseOnMetered WRITE setPauseOnMetered NOTIFY meteredChanged)
+    Q_PROPERTY(bool meteredConnection READ meteredConnection NOTIFY meteredChanged)
+    Q_PROPERTY(bool meteredDetectionAvailable READ meteredDetectionAvailable CONSTANT)
+    // The network in use (NetworkManager's name for it) and the download limit that
+    // applies only while on it (0 = none).
+    Q_PROPERTY(QString currentNetwork READ currentNetwork NOTIFY networkLimitsChanged)
+    Q_PROPERTY(int currentNetworkLimitKBps READ currentNetworkLimitKBps WRITE setCurrentNetworkLimitKBps NOTIFY networkLimitsChanged)
 
 public:
     explicit MainWindow(orbit::core::DownloadManager& manager, bool portable, QObject* parent = nullptr);
@@ -156,6 +173,8 @@ public:
     [[nodiscard]] double seedRatioLimit() const noexcept { return seedRatioLimit_; }
     void setSeedRatioLimit(double ratio);
     [[nodiscard]] int seedTimeLimitMinutes() const noexcept { return seedTimeLimitMinutes_; }
+    [[nodiscard]] bool seedAfterDownload() const noexcept { return seedAfterDownload_; }
+    void setSeedAfterDownload(bool seed);
     void setSeedTimeLimitMinutes(int minutes);
 
     [[nodiscard]] QString mediaCookiesBrowser() const { return mediaCookiesBrowser_; }
@@ -170,6 +189,26 @@ public:
 
     [[nodiscard]] bool portable() const noexcept { return portable_; }
 
+    // Without a window nobody can answer a question, so .torrent files open from outside
+    // start with every file, and a file name that's taken gets a new name.
+    void setHeadless(bool headless);
+
+    [[nodiscard]] QString networkInterface() const { return networkInterface_; }
+    void setNetworkInterface(const QString& name);
+    // [{name, label, up}] for the interfaces worth binding to (no loopback or container bridges).
+    Q_INVOKABLE QVariantList networkInterfaces() const;
+
+    [[nodiscard]] QString currentNetwork() const;
+    [[nodiscard]] int currentNetworkLimitKBps() const;
+    void setCurrentNetworkLimitKBps(int kbps);
+
+    [[nodiscard]] bool pauseOnMetered() const noexcept { return pauseOnMetered_; }
+    void setPauseOnMetered(bool enabled);
+    [[nodiscard]] bool meteredConnection() const noexcept { return metered_; }
+    [[nodiscard]] bool meteredDetectionAvailable() const noexcept { return meteredDetectionAvailable_; }
+    // Resumes what the metered pause stopped and keeps going on this connection.
+    Q_INVOKABLE void overrideMeteredPause();
+
     Q_INVOKABLE QString pickDownloadDirectory();
     Q_INVOKABLE QString pickFolder(const QString& title, const QString& startDir);
     Q_INVOKABLE QString pickTorrentFile();
@@ -182,6 +221,9 @@ public:
     // Opens the file's folder with the file selected.
     Q_INVOKABLE bool revealFile(const QString& path) const;
     Q_INVOKABLE QString dataFolderPath() const;
+    // Asks the compositor to blur the desktop behind a translucent window (KDE Plasma's
+    // hint; compositors without it ignore it, Hyprland blurs translucent windows anyway).
+    Q_INVOKABLE void setBlurBehind(QObject* window, bool enabled) const;
 
     // Adds a download handed to Orbit from outside the app (browser extension via the
     // orbit:// protocol, or another launched instance). A plain link or magnet starts
@@ -196,6 +238,9 @@ public:
 
     // Handles a request from the local API (the browser extension's native host).
     QJsonObject handleApiRequest(const QJsonObject& request);
+    // Handles a request from the `orbit` command line (its own socket, which the browser
+    // helper can't reach): add, list, pause, resume, cancel, remove, show, status.
+    QJsonObject handleControlRequest(const QJsonObject& request);
 
     // Writes settings (and optionally the download list) to a JSON file. Passwords and
     // browser cookies are never included. Returns an error message, or an empty string.
@@ -229,6 +274,12 @@ signals:
     void mediaSettingsChanged();
     void browserIntegrationChanged();
     void quitRequested();
+    void networkInterfaceChanged();
+    void meteredChanged();
+    void networkLimitsChanged();
+    // count downloads were paused because the connection became metered.
+    void meteredPaused(int count);
+    void showWindowRequested();
 
 private:
     void applyRemoteServerState();
@@ -236,6 +287,10 @@ private:
     void applySpeedLimits();
     void applySchedule();
     void applyTorrentSettings();
+    void setupMeteredDetection();
+    void applyMeteredState();
+    void watchMeteredPauses();
+    void retryAfterReconnect();
     orbit::core::DownloadId addLink(const QString& link, orbit::core::DownloadRequest request);
     // Hands an incoming link to a running Refresh Link capture. False when none is running.
     bool offerToLinkCapture(const QString& url, const orbit::core::DownloadRequest& context);
@@ -275,6 +330,7 @@ private:
     int torrentUploadLimitKBps_{0};
     double seedRatioLimit_{0};
     int seedTimeLimitMinutes_{0};
+    bool seedAfterDownload_{false};
 
     QString mediaCookiesBrowser_;
     QString fileConflictAction_{QStringLiteral("ask")};
@@ -285,5 +341,18 @@ private:
     int nextProbeToken_{1};
 
     bool browserIntegrationEnabled_{true};
+
+    bool headless_{false};
+    QString networkInterface_;
+    bool pauseOnMetered_{true};
+    bool metered_{false};
+    bool meteredDetectionAvailable_{false};
+    bool meteredOverridden_{false};
+    std::vector<orbit::core::DownloadId> meteredPausedIds_;
+    QTimer* meteredWatch_{nullptr};
+    class NetworkIdentity* networkIdentity_{nullptr};
+    // Download limits per network name, in KB/s.
+    QVariantMap networkLimits_;
+    std::unordered_map<orbit::core::DownloadId, int> autoRetries_;
     QString browserIntegrationStatus_;
 };

@@ -29,6 +29,12 @@
 
 namespace {
 
+// Update checks can't be routed through a locked network interface (Settings > Network),
+// so while downloads are locked to one they only happen when asked for.
+bool lockedToInterface() {
+    return !QSettings().value(QStringLiteral("network/interface")).toString().trimmed().isEmpty();
+}
+
 constexpr auto kDefaultFeedUrl = "https://orbitdm.netlify.app/updates.json";
 constexpr int kFirstCheckDelayMs = 5000;
 constexpr int kPeriodicCheckMs = 6 * 60 * 60 * 1000;
@@ -129,7 +135,7 @@ UpdateManager::UpdateManager(QObject* parent)
 
     periodicTimer_.setInterval(kPeriodicCheckMs);
     connect(&periodicTimer_, &QTimer::timeout, this, [this] {
-        if (autoCheck_) check(false);
+        if (autoCheck_ && !lockedToInterface()) check(false);
     });
 
     rateTimer_.setInterval(500);
@@ -166,7 +172,7 @@ void UpdateManager::setAutoCheck(bool enabled) {
 void UpdateManager::startAutomaticChecks() {
     QTimer::singleShot(kFirstCheckDelayMs, this, [this] {
         removeStaleInstallers();
-        if (autoCheck_) check(false);
+        if (autoCheck_ && !lockedToInterface()) check(false);
     });
     periodicTimer_.start();
 }

@@ -20,6 +20,12 @@
 
 namespace {
 
+// Update checks can't be routed through a locked network interface (Settings > Network),
+// so while downloads are locked to one they only happen when asked for.
+bool lockedToInterface() {
+    return !QSettings().value(QStringLiteral("network/interface")).toString().trimmed().isEmpty();
+}
+
 constexpr auto kReleaseApi = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
 constexpr int kFirstCheckDelayMs = 20000;
 constexpr int kPeriodicCheckMs = 6 * 60 * 60 * 1000;
@@ -104,7 +110,7 @@ YtDlpUpdater::YtDlpUpdater(QObject* parent) : QObject(parent), network_(new QNet
 
     periodicTimer_.setInterval(kPeriodicCheckMs);
     connect(&periodicTimer_, &QTimer::timeout, this, [this] {
-        if (autoUpdate_ && isDue(kCheckIntervalSecs)) check(false);
+        if (autoUpdate_ && !lockedToInterface() && isDue(kCheckIntervalSecs)) check(false);
     });
 }
 
@@ -166,7 +172,7 @@ void YtDlpUpdater::start() {
     cleanupLeftovers();
     detectVersions();
     QTimer::singleShot(kFirstCheckDelayMs, this, [this] {
-        if (autoUpdate_ && isDue(kCheckIntervalSecs)) check(false);
+        if (autoUpdate_ && !lockedToInterface() && isDue(kCheckIntervalSecs)) check(false);
     });
     periodicTimer_.start();
 }

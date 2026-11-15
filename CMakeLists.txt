@@ -79,6 +79,8 @@ add_library(orbit_core STATIC
     src/core/Types.cpp
     src/core/DownloadTask.cpp
     src/core/HttpDownloader.cpp
+    src/core/InterfaceDns.cpp
+    include/core/InterfaceDns.hpp
     src/core/MediaDownloader.cpp
     include/core/MediaDownloader.hpp
     src/core/TorrentEngine.cpp
@@ -107,6 +109,7 @@ target_link_libraries(orbit_core PUBLIC
 )
 
 target_compile_definitions(orbit_core PUBLIC
+    ORBIT_VERSION="${ORBIT_RELEASE_VERSION}"
     $<$<PLATFORM_ID:Windows>:NOMINMAX;WIN32_LEAN_AND_MEAN;_CRT_SECURE_NO_WARNINGS>
 )
 
@@ -163,6 +166,8 @@ qt_add_executable(orbit
     src/ui/ClipboardMonitor.hpp
     src/ui/ChecksumCalculator.cpp
     src/ui/ChecksumCalculator.hpp
+    src/ui/SystemAppearance.cpp
+    src/ui/SystemAppearance.hpp
     src/ui/resources.qrc
     $<$<NOT:$<PLATFORM_ID:Windows>>:${CMAKE_CURRENT_SOURCE_DIR}/src/ui/fonts.qrc>
     $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/src/ui/assets/app.rc>
@@ -189,11 +194,14 @@ target_link_libraries(orbit PRIVATE
 )
 
 if(UNIX AND NOT APPLE)
-    target_sources(orbit PRIVATE src/ui/LinuxIntegration.cpp src/ui/LinuxIntegration.hpp)
+    target_sources(orbit PRIVATE src/ui/LinuxIntegration.cpp src/ui/LinuxIntegration.hpp
+        src/ui/DesktopNotifications.cpp src/ui/DesktopNotifications.hpp
+        src/ui/CommandLine.cpp src/ui/CommandLine.hpp
+        src/ui/PortalSettings.cpp src/ui/PortalSettings.hpp
+        src/ui/NetworkIdentity.cpp src/ui/NetworkIdentity.hpp)
     target_link_libraries(orbit PRIVATE Qt6::DBus PkgConfig::XCB OpenSSL::Crypto)
 endif()
 
-target_compile_definitions(orbit PRIVATE ORBIT_VERSION="${ORBIT_RELEASE_VERSION}")
 
 set_target_properties(orbit PROPERTIES
     WIN32_EXECUTABLE ON

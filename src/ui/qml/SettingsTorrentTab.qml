@@ -59,10 +59,22 @@ ColumnLayout {
 
     SettingsGroup {
         title: "Seeding"
-        description: "A finished torrent keeps sharing with others until one of these limits is reached, then shows as Completed."
+        description: appController.seedAfterDownload
+                     ? "A finished torrent keeps sharing with others until a limit below is reached, then shows as Completed."
+                     : "A torrent stops as soon as it has finished downloading."
 
         SettingsRow {
             divider: false
+            label: "Keep seeding after downloading"
+            description: "Share the finished torrent with other people"
+            ToggleSwitch {
+                checked: appController.seedAfterDownload
+                onToggled: appController.seedAfterDownload = checked
+            }
+        }
+        SettingsRow {
+            dimmed: !appController.seedAfterDownload
+            enabled: appController.seedAfterDownload
             label: "Stop at share ratio"
             description: "Uploaded ÷ downloaded, e.g. 2 means twice the torrent's size"
             FormField {
@@ -78,6 +90,8 @@ ColumnLayout {
             }
         }
         SettingsRow {
+            dimmed: !appController.seedAfterDownload
+            enabled: appController.seedAfterDownload
             label: "Stop after seeding for"
             FormField {
                 id: seedTimeField

@@ -13,7 +13,11 @@ namespace {
 constexpr qint64 kMaxRequestBytes = 4 * 1024 * 1024;
 }
 
-LocalApiServer::LocalApiServer(Handler handler, QObject* parent) : QObject(parent), handler_(std::move(handler)) {}
+LocalApiServer::LocalApiServer(Handler handler, QObject* parent)
+    : LocalApiServer(QString::fromLatin1(kPipeName), std::move(handler), parent) {}
+
+LocalApiServer::LocalApiServer(QString name, Handler handler, QObject* parent)
+    : QObject(parent), name_(std::move(name)), handler_(std::move(handler)) {}
 
 LocalApiServer::~LocalApiServer() {
     if (server_) server_->close();
@@ -21,16 +25,16 @@ LocalApiServer::~LocalApiServer() {
 
 bool LocalApiServer::listen() {
     if (server_ && server_->isListening()) return true;
-    const QString name = orbit::utils::localServerName(QString::fromLatin1(kPipeName));
+    const QString name = orbit::utils::localServerName(name_);
     QLocalServer::removeServer(name);
     server_ = new QLocalServer(this);
     server_->setSocketOptions(QLocalServer::UserAccessOption);
     connect(server_, &QLocalServer::newConnection, this, &LocalApiServer::onNewConnection);
     if (!server_->listen(name)) {
-        ORBIT_LOG_ERROR("api", "Couldn't open the local API pipe: " + server_->errorString().toStdString());
+        ORBIT_LOG_ERROR("api", "Couldn't open " + name_.toStdString() + ": " + server_->errorString().toStdString());
         return false;
     }
-    ORBIT_LOG_INFO("api", "Local API listening");
+    ORBIT_LOG_INFO("api", "Listening on " + name_.toStdString());
     return true;
 }
 

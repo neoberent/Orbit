@@ -313,11 +313,20 @@ Rectangle {
             ProgressIndicator {
                 visible: !root.showTorrentPage && !root.multi && !root.finished && root.stateName !== "Seeding" && !(root.failed && root.valid && root.item.progress <= 0)
                 Layout.fillWidth: true
-                height: 4
+                height: 6
                 value: root.valid ? root.item.progress : 0
+                // Here, each connection's part of the file is drawn on its own.
+                segments: root.valid && root.item.segments ? root.item.segments : []
                 trackColor: Theme.withAlpha(Theme.textPrimary, 0.06)
                 fillColor: root.stateName === "Downloading" ? Theme.accent : (root.failed ? Theme.withAlpha(Theme.danger, 0.7) : Theme.withAlpha(Theme.textSecondary, 0.55))
                 indeterminate: root.stateName === "Connecting"
+            }
+            Text {
+                readonly property int parts: root.valid && root.item.segments ? Math.floor(root.item.segments.length / 2) : 0
+                visible: !root.showTorrentPage && !root.multi && parts >= 2 && !root.finished
+                text: parts + " parts, each fetched over its own connection"
+                color: Theme.textTertiary
+                font.pixelSize: Theme.fontMicro
             }
 
             Flow {

@@ -134,6 +134,22 @@ Rectangle {
             text: appController.scheduleStartTime + "–" + appController.scheduleEndTime
         }
         Note {
+            visible: appController.networkInterface.length > 0
+            iconName: "network"
+            text: "Only via " + appController.networkInterface
+        }
+        Note {
+            visible: appController.currentNetworkLimitKBps > 0
+            iconName: "downloading"
+            text: "Limit " + appController.currentNetworkLimitKBps + " KB/s on " + appController.currentNetwork
+        }
+        Note {
+            visible: appController.meteredConnection && appController.pauseOnMetered
+            showDot: true
+            dotColor: Theme.warning
+            text: "Metered connection"
+        }
+        Note {
             visible: appController.proxyType !== "none"
             iconName: "network"
             text: (appController.proxyType === "socks5" ? "SOCKS5" : "HTTP") + " proxy"

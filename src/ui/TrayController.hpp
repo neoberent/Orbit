@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QObject>
+#include <QColor>
+#include <QIcon>
 #include <QPoint>
 #include <QString>
 
@@ -8,6 +10,7 @@ class QAction;
 class QActionGroup;
 class QQuickWindow;
 class QSystemTrayIcon;
+class DesktopNotifications;
 
 // Owns the system tray icon and menu, and mediates showing/hiding the main QML window
 // so the app can live in the tray instead of quitting when the window is closed.
@@ -15,7 +18,8 @@ class TrayController final : public QObject {
     Q_OBJECT
 
 public:
-    explicit TrayController(QObject* parent = nullptr);
+    // Without showIcon (headless) there's no tray icon, only desktop notifications.
+    explicit TrayController(bool showIcon = true, QObject* parent = nullptr);
 
     void attachWindow(QQuickWindow* window);
 
@@ -24,6 +28,14 @@ public:
 
     Q_INVOKABLE void notifyDownloadAdded(const QString& label);
     Q_INVOKABLE void notify(const QString& title, const QString& message, bool warning = false);
+    // A finished or failed download. On Linux the notification gets buttons (Open, Show in
+    // Folder, or Retry) that come back through downloadActionRequested.
+    Q_INVOKABLE void notifyTransfer(qlonglong id, const QString& title, const QString& message, bool success);
+    // Downloads were paused because the connection is metered; offers to continue anyway.
+    void notifyMetered(int count);
+    // Draws a thin ring around the tray icon that fills with the overall progress of what's
+    // downloading (0..1), in the accent colour; a negative value removes it.
+    Q_INVOKABLE void setProgress(double progress, const QColor& color);
     Q_INVOKABLE void setStatus(const QString& tooltip, bool canPause, bool canResume);
     // Reflects the armed "when downloads finish" action in the tray menu.
     void setWhenDoneAction(const QString& action, bool hibernateAvailable);
@@ -35,9 +47,13 @@ signals:
     void pauseAllRequested();
     void resumeAllRequested();
     void whenDoneRequested(const QString& action);
+    // "open", "reveal" or "retry", picked on a download's notification.
+    void downloadActionRequested(qlonglong id, const QString& action);
+    void meteredResumeRequested();
 
 private:
     void buildTrayIcon();
+    void showMessage(const QString& title, const QString& message, bool warning, int timeoutMs);
 
     QQuickWindow* window_{nullptr};
     QSystemTrayIcon* trayIcon_{nullptr};
@@ -45,4 +61,8 @@ private:
     QAction* resumeAllAction_{nullptr};
     QActionGroup* whenDoneGroup_{nullptr};
     bool hasShownTrayHint_{false};
+    QIcon baseIcon_;
+    int shownProgressStep_{-1};
+    QColor shownProgressColor_;
+    DesktopNotifications* desktopNotifications_{nullptr};
 };

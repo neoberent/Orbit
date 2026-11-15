@@ -1,4 +1,7 @@
 #include "ChecksumCalculator.hpp"
+#if !defined(_WIN32)
+#include "CommandLine.hpp"
+#endif
 #include "ClipboardMonitor.hpp"
 #include "DownloadFilterProxyModel.hpp"
 #include "DownloadListModel.hpp"
@@ -6,6 +9,7 @@
 #include "MainWindow.hpp"
 #include "PowerManager.hpp"
 #include "SplashScreen.hpp"
+#include "SystemAppearance.hpp"
 #include "TrayController.hpp"
 #include "UpdateManager.hpp"
 #include "YtDlpUpdater.hpp"
@@ -29,7 +33,11 @@
 #include <QQuickWindow>
 #include <QTimer>
 
+#include <cstring>
+#include <algorithm>
+#include <cctype>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <QStringList>
 #include <QSettings>
@@ -89,6 +97,13 @@ QString extractPendingProtocolUrl(int argc, char* argv[]) {
         }
     }
     return {};
+}
+
+bool hasArgument(int argc, char* argv[], const char* flag) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], flag) == 0) return true;
+    }
+    return false;
 }
 
 // Portable mode keeps every setting, log and download record in a Data folder next to
@@ -198,9 +213,21 @@ int main(int argc, char* argv[]) {
     Q_INIT_RESOURCE(webassets);
 
     waitForPreviousInstance(argc, argv);
+    // --background starts in the tray without opening the window (autostart, `orbit add`);
+    // --headless runs with no window or tray at all, for a server or a systemd service.
+    const bool headless = hasArgument(argc, argv, "--headless");
+    const bool startInBackground = headless || hasArgument(argc, argv, "--background");
 #if !defined(_WIN32)
     runFromRealLocation(argv);
-    const bool platformChosen = choosePlatform();
+    if (const auto exitCode = command_line::run(argc, argv)) return *exitCode;
+    bool platformChosen = false;
+    if (headless) {
+        // No display needed: Qt draws nothing and opens no connection to one.
+        qputenv("QT_QPA_PLATFORM", "offscreen");
+        platformChosen = true;
+    } else {
+        platformChosen = choosePlatform();
+    }
 #endif
 
     QApplication app(argc, argv);
@@ -275,31 +302,61 @@ int main(int argc, char* argv[]) {
     appFont.setHintingPreference(QFont::PreferFullHinting);
     QApplication::setFont(appFont);
 
-    SplashScreen splash(QApplication::applicationVersion());
-    splash.show();
-    splash.setStatus(QStringLiteral("Starting up"), 0.08);
+    std::optional<SplashScreen> splash;
+    if (!startInBackground) {
+        splash.emplace(QApplication::applicationVersion());
+        splash->show();
+        splash->setStatus(QStringLiteral("Starting up"), 0.08);
+    }
+    if (headless) ORBIT_LOG_INFO("main", "Running headless (no window or tray)");
 
     if (qEnvironmentVariableIsEmpty("QT_QUICK_CONTROLS_STYLE")) {
         QQuickStyle::setStyle("Basic");
     }
 
-    splash.setStatus(QStringLiteral("Restoring downloads"), 0.3);
-    orbit::core::DownloadManager manager(orbit::utils::appDataDir() / "state");
+    if (splash) splash->setStatus(QStringLiteral("Restoring downloads"), 0.3);
+    // The interface lock has to hold from the first connection the engines make, before
+    // the settings are otherwise read (MainWindow checks and applies it again).
+    std::string lockedInterface = QSettings().value("network/interface").toString().trimmed().toStdString();
+    if (lockedInterface.size() > 15 ||
+        !std::all_of(lockedInterface.begin(), lockedInterface.end(), [](unsigned char c) { return std::isalnum(c) || c == '_' || c == '.' || c == '-'; })) {
+        lockedInterface.clear();
+    }
+    orbit::core::DownloadManager manager(orbit::utils::appDataDir() / "state", lockedInterface);
 
     DownloadListModel downloadModel(manager);
     MainWindow controller(manager, portable);
-    TrayController trayController;
+    controller.setHeadless(headless);
+    TrayController trayController(!headless);
     UpdateManager updateManager;
     YtDlpUpdater ytDlpUpdater;
     PowerManager powerManager(downloadModel);
-    ClipboardMonitor clipboardMonitor;
+    // Without a desktop there's no clipboard worth watching.
+    std::optional<ClipboardMonitor> clipboardMonitor;
+    if (!headless) clipboardMonitor.emplace();
     LocalApiServer apiServer([&controller](const QJsonObject& request) { return controller.handleApiRequest(request); });
     apiServer.listen();
+#if !defined(_WIN32)
+    LocalApiServer controlServer(QString::fromLatin1(command_line::kControlSocketName),
+                                 [&controller](const QJsonObject& request) { return controller.handleControlRequest(request); });
+    controlServer.listen();
+#endif
+    QObject::connect(&controller, &MainWindow::showWindowRequested, &trayController, &TrayController::showAndRaise);
+    QObject::connect(&controller, &MainWindow::meteredPaused, &trayController, [&trayController](int count) {
+        trayController.notifyMetered(count);
+    });
+    QObject::connect(&trayController, &TrayController::meteredResumeRequested, &controller, &MainWindow::overrideMeteredPause);
 
     qmlRegisterType<ChecksumCalculator>("Orbit.Native", 1, 0, "ChecksumCalculator");
 
     DownloadFilterProxyModel downloadProxyModel;
     downloadProxyModel.setSourceModel(&downloadModel);
+
+    SystemAppearance systemAppearance;
+#if !defined(_WIN32)
+    // Lets the window be see-through when the translucent look is on (Settings > General).
+    QQuickWindow::setDefaultAlphaBuffer(true);
+#endif
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("downloadModel", &downloadModel);
@@ -309,7 +366,8 @@ int main(int argc, char* argv[]) {
     engine.rootContext()->setContextProperty("updateManager", &updateManager);
     engine.rootContext()->setContextProperty("ytDlpUpdater", &ytDlpUpdater);
     engine.rootContext()->setContextProperty("powerManager", &powerManager);
-    engine.rootContext()->setContextProperty("clipboardMonitor", &clipboardMonitor);
+    engine.rootContext()->setContextProperty("systemAppearance", &systemAppearance);
+    engine.rootContext()->setContextProperty("clipboardMonitor", clipboardMonitor ? &*clipboardMonitor : nullptr);
 
     QObject::connect(&trayController, &TrayController::quitRequested, &app, &QCoreApplication::quit);
     QObject::connect(&powerManager, &PowerManager::quitRequested, &app, &QCoreApplication::quit, Qt::QueuedConnection);
@@ -358,15 +416,18 @@ int main(int argc, char* argv[]) {
         }
     });
 
-    splash.setStatus(QStringLiteral("Loading interface"), 0.6);
-    engine.load(QUrl(QStringLiteral("qrc:/qml/main.qml")));
-    if (engine.rootObjects().isEmpty()) {
-        ORBIT_LOG_ERROR("main", "Failed to load QML UI");
-        splash.dismiss();
-        return -1;
+    QQuickWindow* rootWindow = nullptr;
+    if (!headless) {
+        if (splash) splash->setStatus(QStringLiteral("Loading interface"), 0.6);
+        engine.load(QUrl(QStringLiteral("qrc:/qml/main.qml")));
+        if (engine.rootObjects().isEmpty()) {
+            ORBIT_LOG_ERROR("main", "Failed to load QML UI");
+            if (splash) splash->dismiss();
+            return -1;
+        }
+        rootWindow = qobject_cast<QQuickWindow*>(engine.rootObjects().first());
     }
 
-    auto* rootWindow = qobject_cast<QQuickWindow*>(engine.rootObjects().first());
 
     QObject::connect(&updateManager, &UpdateManager::installerLaunched, &app, [rootWindow] {
         if (rootWindow) rootWindow->hide();
@@ -413,46 +474,56 @@ int main(int argc, char* argv[]) {
 #endif
     }
 
-    QObject::connect(&splash, &SplashScreen::revealRequested, &app, [&] {
-        if (uiRevealed) return;
-        uiRevealed = true;
-        if (rootWindow) {
-#if defined(_WIN32)
-            const auto hwnd = reinterpret_cast<HWND>(rootWindow->winId());
-            constexpr DWORD kDwmwaCloak = 13;
-            const BOOL cloak = TRUE;
-            DwmSetWindowAttribute(hwnd, kDwmwaCloak, &cloak, sizeof(cloak));
-#endif
-            auto handedOver = std::make_shared<bool>(false);
-            auto frames = std::make_shared<int>(0);
-            auto frameConnection = std::make_shared<QMetaObject::Connection>();
-            auto handOver = [=, &splash] {
-                if (*handedOver) return;
-                *handedOver = true;
-                QObject::disconnect(*frameConnection);
-#if defined(_WIN32)
-                const BOOL uncloak = FALSE;
-                DwmSetWindowAttribute(hwnd, kDwmwaCloak, &uncloak, sizeof(uncloak));
-#endif
-                splash.fadeOut();
-            };
-            *frameConnection = QObject::connect(
-                rootWindow, &QQuickWindow::frameSwapped, &app,
-                [frames, handOver] {
-                    if (++*frames >= 2) handOver();
-                },
-                Qt::QueuedConnection);
-            QTimer::singleShot(600, &app, handOver);
-            QMetaObject::invokeMethod(rootWindow, "reveal");
-        } else {
-            splash.fadeOut();
-        }
+    auto releaseDeferredPayloads = [&] {
         for (const QString& payload : std::exchange(deferredPayloads, {})) {
             QMetaObject::invokeMethod(
                 &app, [&, payload] { handleIncomingPayload(payload); }, Qt::QueuedConnection);
         }
-    });
-    splash.finish();
+    };
+    if (startInBackground) {
+        // The window stays hidden until the tray icon (or `orbit show`) opens it.
+        uiRevealed = true;
+        ORBIT_LOG_INFO("main", headless ? "Started headless" : "Started in the tray");
+        releaseDeferredPayloads();
+    } else {
+        QObject::connect(&*splash, &SplashScreen::revealRequested, &app, [&] {
+            if (uiRevealed) return;
+            uiRevealed = true;
+            if (rootWindow) {
+#if defined(_WIN32)
+                const auto hwnd = reinterpret_cast<HWND>(rootWindow->winId());
+                constexpr DWORD kDwmwaCloak = 13;
+                const BOOL cloak = TRUE;
+                DwmSetWindowAttribute(hwnd, kDwmwaCloak, &cloak, sizeof(cloak));
+#endif
+                auto handedOver = std::make_shared<bool>(false);
+                auto frames = std::make_shared<int>(0);
+                auto frameConnection = std::make_shared<QMetaObject::Connection>();
+                auto handOver = [=, &splash] {
+                    if (*handedOver) return;
+                    *handedOver = true;
+                    QObject::disconnect(*frameConnection);
+#if defined(_WIN32)
+                    const BOOL uncloak = FALSE;
+                    DwmSetWindowAttribute(hwnd, kDwmwaCloak, &uncloak, sizeof(uncloak));
+#endif
+                    splash->fadeOut();
+                };
+                *frameConnection = QObject::connect(
+                    rootWindow, &QQuickWindow::frameSwapped, &app,
+                    [frames, handOver] {
+                        if (++*frames >= 2) handOver();
+                    },
+                    Qt::QueuedConnection);
+                QTimer::singleShot(600, &app, handOver);
+                QMetaObject::invokeMethod(rootWindow, "reveal");
+            } else {
+                splash->fadeOut();
+            }
+            releaseDeferredPayloads();
+        });
+        splash->finish();
+    }
 
     const int exitCode = QApplication::exec();
     ORBIT_LOG_INFO("main", "Shutting down");

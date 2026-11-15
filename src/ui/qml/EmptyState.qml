@@ -56,6 +56,41 @@ Item {
             Behavior on color { ColorAnimation { duration: Theme.animNormal } }
             Behavior on border.color { ColorAnimation { duration: Theme.animNormal } }
 
+            // A small body in orbit around the tile: slow, and paused while dragging.
+            Item {
+                id: orbitPath
+                anchors.centerIn: parent
+                width: 76
+                height: 76
+                visible: root.visible && !root.dragActive
+                opacity: visible ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: Theme.animSlow } }
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: width / 2
+                    color: "transparent"
+                    border.width: 1
+                    border.color: Theme.withAlpha(Theme.textPrimary, 0.05)
+                }
+                Rectangle {
+                    width: 6
+                    height: 6
+                    radius: 3
+                    x: (parent.width - width) / 2
+                    y: -height / 2
+                    color: Theme.accent
+                    opacity: 0.85
+                }
+                RotationAnimation on rotation {
+                    running: orbitPath.visible
+                    loops: Animation.Infinite
+                    from: 0
+                    to: 360
+                    duration: 14000
+                }
+            }
+
             Icon {
                 anchors.centerIn: parent
                 name: root.displayIcon

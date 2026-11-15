@@ -23,6 +23,8 @@ public:
     static constexpr const char* kPipeName = "OrbitDownloadManager.Api";
 
     explicit LocalApiServer(Handler handler, QObject* parent = nullptr);
+    // The same, on another socket name (the command line's control socket).
+    LocalApiServer(QString name, Handler handler, QObject* parent = nullptr);
     ~LocalApiServer() override;
 
     bool listen();
@@ -32,6 +34,7 @@ private:
     void onNewConnection();
     void onReadyRead(QLocalSocket* socket);
 
+    QString name_;
     Handler handler_;
     QLocalServer* server_{nullptr};
     QHash<QLocalSocket*, QByteArray> buffers_;

@@ -35,6 +35,9 @@ private:
 // accepted the request.
 void requestPowerAction(const QString& action, QObject* context, std::function<void(const QString&)> done);
 
+// Sets or clears _KDE_NET_WM_BLUR_BEHIND_REGION on an X11 window (the whole window).
+void setBlurBehind(quintptr windowId, bool enabled);
+
 // Opens the file manager with the file selected (org.freedesktop.FileManager1).
 bool revealInFileManager(const QString& filePath);
 

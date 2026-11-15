@@ -19,6 +19,8 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QNetworkInformation>
+#include <QNetworkInterface>
 #include <QNetworkProxy>
 #include <QPointer>
 #include <QProcess>
@@ -26,18 +28,31 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QTimer>
+#include <QWindow>
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 #if defined(_WIN32)
 #include <windows.h>
 #include <dpapi.h>
 #elif defined(__linux__)
 #include "LinuxIntegration.hpp"
+#include "NetworkIdentity.hpp"
 #endif
 
 namespace {
+
+// Interface names are short and use none of the separators curl and libtorrent parse
+// (':' starts a port, ',' another interface); a name from an edited or restored settings
+// file goes through the same check as one picked in Settings.
+bool isValidInterfaceName(const QString& name) {
+    static const QRegularExpression valid(QStringLiteral("^[A-Za-z0-9_.-]{0,15}$"));
+    return valid.match(name).hasMatch();
+}
+
 
 // Encrypts a secret for the current user (DPAPI on Windows, a per-user key on Linux), so a
 // copied settings file or registry export doesn't reveal it.
@@ -138,10 +153,18 @@ MainWindow::MainWindow(orbit::core::DownloadManager& manager, bool portable, QOb
     proxyPassword_ = unprotectSecret(settings.value("network/proxyPassword").toString());
     applyProxy();
 
+    networkInterface_ = settings.value("network/interface").toString().trimmed();
+    if (!isValidInterfaceName(networkInterface_)) {
+        ORBIT_LOG_WARN("network", "Ignoring an invalid network interface name in the settings");
+        networkInterface_.clear();
+    }
+    if (!networkInterface_.isEmpty()) manager_.setNetworkInterface(networkInterface_.toStdString());
+
     torrentDownloadLimitKBps_ = settings.value("torrent/downloadLimitKBps", 0).toInt();
     torrentUploadLimitKBps_ = settings.value("torrent/uploadLimitKBps", 0).toInt();
     seedRatioLimit_ = settings.value("torrent/seedRatioLimit", 0.0).toDouble();
     seedTimeLimitMinutes_ = settings.value("torrent/seedTimeLimitMinutes", 0).toInt();
+    seedAfterDownload_ = settings.value("torrent/seedAfterDownload", false).toBool();
     applyTorrentSettings();
 
     mediaCookiesBrowser_ = settings.value("media/cookiesFromBrowser").toString();
@@ -187,12 +210,187 @@ MainWindow::MainWindow(orbit::core::DownloadManager& manager, bool portable, QOb
     scheduler_->setEnabled(scheduleEnabled_);
     applySpeedLimits();
 
+    networkLimits_ = settings.value("network/limits").toMap();
+#if defined(__linux__)
+    networkIdentity_ = new NetworkIdentity(this);
+    connect(networkIdentity_, &NetworkIdentity::changed, this, [this] {
+        applySpeedLimits();
+        emit networkLimitsChanged();
+    });
+#endif
+
+    pauseOnMetered_ = settings.value("network/pauseOnMetered", true).toBool();
+    setupMeteredDetection();
+
     browserIntegrationEnabled_ = settings.value("browser/integration", !portable_).toBool();
     if (browserIntegrationEnabled_) repairBrowserIntegration();
     else browserIntegrationStatus_ = QStringLiteral("Turned off");
 }
 
 MainWindow::~MainWindow() = default;
+
+void MainWindow::setHeadless(bool headless) {
+    headless_ = headless;
+    if (headless && fileConflictAction_ == QLatin1String("ask")) {
+        manager_.setDefaultFileConflictAction(orbit::core::FileConflictAction::Rename);
+    }
+}
+
+void MainWindow::setNetworkInterface(const QString& name) {
+    const QString trimmed = name.trimmed();
+    if (!isValidInterfaceName(trimmed) || trimmed == networkInterface_) return;
+    networkInterface_ = trimmed;
+    QSettings().setValue("network/interface", trimmed);
+    manager_.setNetworkInterface(trimmed.toStdString());
+    ORBIT_LOG_INFO("network", trimmed.isEmpty() ? std::string("Downloads use any network interface")
+                                                : "Downloads bound to network interface " + trimmed.toStdString());
+    emit networkInterfaceChanged();
+}
+
+QVariantList MainWindow::networkInterfaces() const {
+    static const QRegularExpression hidden(QStringLiteral("^(lo|docker|veth|br-|virbr|vnet|podman|cni|flannel|kube)"));
+    QVariantList result;
+    bool savedListed = networkInterface_.isEmpty();
+    for (const QNetworkInterface& iface : QNetworkInterface::allInterfaces()) {
+        if (iface.flags().testFlag(QNetworkInterface::IsLoopBack) || hidden.match(iface.name()).hasMatch()) continue;
+        const bool up = iface.flags().testFlag(QNetworkInterface::IsUp) && iface.flags().testFlag(QNetworkInterface::IsRunning);
+        QString address;
+        for (const QNetworkAddressEntry& entry : iface.addressEntries()) {
+            if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol) {
+                address = entry.ip().toString();
+                break;
+            }
+        }
+        const bool vpn = iface.type() == QNetworkInterface::Virtual || iface.name().startsWith(QLatin1String("wg")) ||
+                         iface.name().startsWith(QLatin1String("tun")) || iface.name().startsWith(QLatin1String("tap")) ||
+                         iface.name().startsWith(QLatin1String("proton")) || iface.name().startsWith(QLatin1String("nordlynx"));
+        result.append(QVariantMap{{"name", iface.name()}, {"address", address}, {"up", up}, {"vpn", vpn}});
+        if (iface.name() == networkInterface_) savedListed = true;
+    }
+    // A VPN that's down right now has no interface at all; keep the saved choice visible.
+    if (!savedListed) result.append(QVariantMap{{"name", networkInterface_}, {"address", QString()}, {"up", false}, {"vpn", true}});
+    return result;
+}
+
+void MainWindow::setupMeteredDetection() {
+    if (!QNetworkInformation::loadBackendByFeatures(QNetworkInformation::Feature::Metered)) {
+        ORBIT_LOG_INFO("network", "No metered-connection detection on this system");
+        return;
+    }
+    QNetworkInformation* info = QNetworkInformation::instance();
+    meteredDetectionAvailable_ = true;
+    metered_ = info->isMetered();
+    ORBIT_LOG_INFO("network", "Metered-connection detection through " + info->backendName().toStdString() +
+                                  (metered_ ? " (metered now)" : ""));
+    connect(info, &QNetworkInformation::isMeteredChanged, this, [this](bool metered) {
+        if (metered == metered_) return;
+        metered_ = metered;
+        ORBIT_LOG_INFO("network", metered ? "The connection is metered now" : "The connection isn't metered any more");
+        if (!metered) meteredOverridden_ = false;
+        emit meteredChanged();
+        applyMeteredState();
+    });
+    // Downloads restored at startup start right after this; give them a moment to.
+    QTimer::singleShot(1500, this, [this] { applyMeteredState(); });
+
+    if (info->supports(QNetworkInformation::Feature::Reachability)) {
+        connect(info, &QNetworkInformation::reachabilityChanged, this, [this](QNetworkInformation::Reachability reachability) {
+            if (reachability != QNetworkInformation::Reachability::Online) return;
+            // Give the new connection (or a VPN coming up with it) a moment to settle.
+            QTimer::singleShot(3000, this, [this] { retryAfterReconnect(); });
+        });
+    }
+}
+
+namespace {
+
+// Failures a working connection can fix: dropped or refused connections, timeouts, name
+// lookups, a bound interface that was down. Not a 4xx answer, a bad checksum or a full
+// disk, which would only fail the same way again.
+bool failedForNetworkReasons(const std::string& error) {
+    static const char* const kPermanent[] = {"HTTP 4", "free space", "checksum", "Could not create destination",
+                                             "yt-dlp was not found", "Unsupported URL", "Video unavailable",
+                                             "Private video", "Sign in"};
+    for (const char* marker : kPermanent) {
+        if (error.find(marker) != std::string::npos) return false;
+    }
+    return !error.empty();
+}
+
+}
+
+void MainWindow::retryAfterReconnect() {
+    int retried = 0;
+    for (const auto& snap : manager_.snapshot()) {
+        if (snap.state != orbit::core::DownloadState::Error || snap.type == orbit::core::DownloadType::Torrent) continue;
+        if (!failedForNetworkReasons(snap.errorMessage)) continue;
+        // At most a few automatic tries per download, so a link that's simply dead
+        // doesn't restart on every Wi-Fi hiccup.
+        int& tries = autoRetries_[snap.id];
+        if (tries >= 3) continue;
+        ++tries;
+        manager_.resume(snap.id);
+        ++retried;
+    }
+    if (retried > 0) ORBIT_LOG_INFO("network", "Back online; retrying " + std::to_string(retried) + " failed downloads");
+}
+
+void MainWindow::applyMeteredState() {
+    using orbit::core::DownloadState;
+    if (metered_ && pauseOnMetered_ && !meteredOverridden_) {
+        int paused = 0;
+        for (const auto& snap : manager_.snapshot()) {
+            if (snap.state != DownloadState::Downloading && snap.state != DownloadState::Connecting &&
+                snap.state != DownloadState::Queued && snap.state != DownloadState::Seeding) continue;
+            if (std::find(meteredPausedIds_.begin(), meteredPausedIds_.end(), snap.id) != meteredPausedIds_.end()) continue;
+            manager_.pause(snap.id);
+            meteredPausedIds_.push_back(snap.id);
+            ++paused;
+        }
+        if (paused > 0) {
+            ORBIT_LOG_INFO("network", "Paused " + std::to_string(paused) + " downloads on a metered connection");
+            emit meteredPaused(paused);
+            watchMeteredPauses();
+        }
+        return;
+    }
+    // Not metered (or the user said to go ahead): resume what this paused, and nothing else.
+    for (const auto id : std::exchange(meteredPausedIds_, {})) {
+        const auto snap = manager_.snapshot(id);
+        if (snap && snap->state == DownloadState::Paused) manager_.resume(id);
+    }
+}
+
+// A download the user starts again by hand is theirs from then on: if they pause it later,
+// the end of the metered connection mustn't resume it. Checked every couple of seconds
+// while any metered pauses are outstanding.
+void MainWindow::watchMeteredPauses() {
+    if (!meteredWatch_) {
+        meteredWatch_ = new QTimer(this);
+        meteredWatch_->setInterval(2000);
+        connect(meteredWatch_, &QTimer::timeout, this, [this] {
+            std::erase_if(meteredPausedIds_, [this](orbit::core::DownloadId id) {
+                const auto snap = manager_.snapshot(id);
+                return !snap || snap->state != orbit::core::DownloadState::Paused;
+            });
+            if (meteredPausedIds_.empty()) meteredWatch_->stop();
+        });
+    }
+    meteredWatch_->start();
+}
+
+void MainWindow::setPauseOnMetered(bool enabled) {
+    if (enabled == pauseOnMetered_) return;
+    pauseOnMetered_ = enabled;
+    QSettings().setValue("network/pauseOnMetered", enabled);
+    emit meteredChanged();
+    applyMeteredState();
+}
+
+void MainWindow::overrideMeteredPause() {
+    meteredOverridden_ = true;
+    applyMeteredState();
+}
 
 void MainWindow::setDarkTheme(bool dark) {
     if (darkTheme_ == dark) return;
@@ -237,10 +435,41 @@ void MainWindow::setHttpSpeedLimitKBps(int kbps) {
     emit httpSpeedLimitKBpsChanged();
 }
 
+QString MainWindow::currentNetwork() const {
+#if defined(__linux__)
+    return networkIdentity_ ? networkIdentity_->name() : QString();
+#else
+    return {};
+#endif
+}
+
+int MainWindow::currentNetworkLimitKBps() const {
+    const QString name = currentNetwork();
+    return name.isEmpty() ? 0 : std::max(0, networkLimits_.value(name).toInt());
+}
+
+void MainWindow::setCurrentNetworkLimitKBps(int kbps) {
+    const QString name = currentNetwork();
+    if (name.isEmpty()) return;
+    kbps = std::max(0, kbps);
+    if (kbps == currentNetworkLimitKBps()) return;
+    if (kbps > 0) networkLimits_.insert(name, kbps);
+    else networkLimits_.remove(name);
+    QSettings().setValue("network/limits", networkLimits_);
+    ORBIT_LOG_INFO("network", kbps > 0 ? "Download limit on this network: " + std::to_string(kbps) + " KB/s"
+                                       : std::string("No download limit on this network"));
+    applySpeedLimits();
+    emit networkLimitsChanged();
+}
+
 void MainWindow::applySpeedLimits() {
-    auto capped = [this](int limitKBps) {
-        if (!speedRuleActive_) return limitKBps;
-        return limitKBps > 0 ? std::min(limitKBps, speedRuleLimitKBps_) : speedRuleLimitKBps_;
+    // The lowest of the limits in force: the general one, the scheduled one, and the one
+    // for the network Orbit is on.
+    const int networkLimit = currentNetworkLimitKBps();
+    auto capped = [this, networkLimit](int limitKBps) {
+        auto lower = [](int a, int b) { return a > 0 && b > 0 ? std::min(a, b) : std::max(a, b); };
+        if (speedRuleActive_) limitKBps = lower(limitKBps, speedRuleLimitKBps_);
+        return lower(limitKBps, networkLimit);
     };
     const int http = capped(httpSpeedLimitKBps_);
     const int torrentDown = capped(torrentDownloadLimitKBps_);
@@ -279,6 +508,14 @@ QString MainWindow::dataFolderPath() const {
 
 bool MainWindow::openDataFolder() const {
     return QDesktopServices::openUrl(QUrl::fromLocalFile(dataFolderPath()));
+}
+
+void MainWindow::setBlurBehind(QObject* window, bool enabled) const {
+#if defined(__linux__)
+    if (auto* w = qobject_cast<QWindow*>(window)) linux_integration::setBlurBehind(w->winId(), enabled);
+#else
+    Q_UNUSED(window) Q_UNUSED(enabled)
+#endif
 }
 
 bool MainWindow::revealFile(const QString& path) const {
@@ -409,6 +646,14 @@ QString MainWindow::addFromExternalSource(const QString& source) {
         return QString();
     }
 
+    if (isTorrentFile && headless_) {
+        orbit::core::DownloadRequest request;
+        request.source = trimmed.toStdString();
+        request.destinationDir = manager_.defaultDownloadDir().string();
+        request.maxConnections = maxConnectionsPerDownload_;
+        manager_.addTorrent(std::move(request));
+        return trimmed;
+    }
     if (isTorrentFile) {
         // A .torrent's file list should be reviewed before anything starts downloading,
         // so route it to the Add Download dialog (which can parse a local .torrent and
@@ -474,6 +719,155 @@ QJsonObject MainWindow::handleApiRequest(const QJsonObject& request) {
                               std::to_string(cookieCount) + " cookies");
     emit externalDownloadAdded(fileName.isEmpty() ? url : fileName);
     return QJsonObject{{"ok", true}, {"id", QString::number(static_cast<qulonglong>(id))}, {"kind", kind}};
+}
+
+namespace {
+
+bool isTransferring(orbit::core::DownloadState state) {
+    using orbit::core::DownloadState;
+    return state == DownloadState::Downloading || state == DownloadState::Connecting || state == DownloadState::Seeding;
+}
+
+QJsonObject controlTaskJson(const orbit::core::TaskSnapshot& snap) {
+    // A finished or paused task keeps the last rate it measured; it isn't moving any more.
+    const bool moving = isTransferring(snap.state);
+    QJsonObject task{
+        {"id", QString::number(static_cast<qulonglong>(snap.id))},
+        {"name", QString::fromStdString(snap.name)},
+        {"type", QString::fromLatin1(orbit::core::toString(snap.type))},
+        {"state", QString::fromLatin1(orbit::core::toString(snap.state))},
+        {"progress", snap.stats.progressRatio()},
+        {"downloaded", static_cast<double>(snap.stats.bytesDownloaded)},
+        {"total", static_cast<double>(snap.stats.totalBytes)},
+        {"downloadRate", moving ? snap.stats.downloadRateBytesPerSec : 0.0},
+        {"uploadRate", moving ? snap.stats.uploadRateBytesPerSec : 0.0},
+        {"path", QString::fromStdString(snap.destinationPath)},
+        {"source", QString::fromStdString(snap.source)},
+    };
+    if (moving && snap.stats.eta) task.insert("eta", static_cast<double>(snap.stats.eta->count()));
+    if (!snap.errorMessage.empty()) task.insert("error", QString::fromStdString(snap.errorMessage));
+    static const char* const kChecksum[] = {"none", "pending", "verifying", "match", "mismatch", "failed"};
+    task.insert("checksum", QString::fromLatin1(kChecksum[static_cast<int>(snap.checksumState)]));
+    return task;
+}
+
+}
+
+QJsonObject MainWindow::handleControlRequest(const QJsonObject& request) {
+    using orbit::core::DownloadId;
+    using orbit::core::DownloadState;
+    const QString type = request.value("type").toString();
+    auto fail = [](const QString& message) { return QJsonObject{{"ok", false}, {"error", message}}; };
+
+    if (type == QLatin1String("ping")) {
+        return QJsonObject{{"ok", true}, {"version", QCoreApplication::applicationVersion()}};
+    }
+    if (type == QLatin1String("show")) {
+        emit showWindowRequested();
+        return QJsonObject{{"ok", true}};
+    }
+    if (type == QLatin1String("list") || type == QLatin1String("status")) {
+        QJsonArray tasks;
+        int active = 0, queued = 0, paused = 0, seeding = 0, done = 0, failed = 0;
+        double down = 0, up = 0;
+        for (const auto& snap : manager_.snapshot()) {
+            tasks.append(controlTaskJson(snap));
+            switch (snap.state) {
+                case DownloadState::Downloading:
+                case DownloadState::Connecting: ++active; break;
+                case DownloadState::Queued: ++queued; break;
+                case DownloadState::Paused: ++paused; break;
+                case DownloadState::Seeding: ++seeding; break;
+                case DownloadState::Completed: ++done; break;
+                case DownloadState::Error:
+                case DownloadState::Cancelled: ++failed; break;
+            }
+            if (isTransferring(snap.state)) {
+                down += snap.stats.downloadRateBytesPerSec;
+                up += snap.stats.uploadRateBytesPerSec;
+            }
+        }
+        QJsonObject reply{{"ok", true},
+                          {"active", active}, {"queued", queued}, {"paused", paused}, {"seeding", seeding},
+                          {"completed", done}, {"failed", failed}, {"downloadRate", down}, {"uploadRate", up},
+                          {"metered", metered_ && pauseOnMetered_ && !meteredOverridden_},
+                          {"networkInterface", networkInterface_}};
+        if (type == QLatin1String("list")) reply.insert("downloads", tasks);
+        return reply;
+    }
+    if (type == QLatin1String("add")) {
+        const QString source = request.value("source").toString().trimmed();
+        orbit::core::DownloadRequest download;
+        const QString directory = request.value("directory").toString().trimmed();
+        if (!directory.isEmpty()) {
+            if (!QDir::isAbsolutePath(directory)) return fail(QStringLiteral("The folder must be an absolute path"));
+            if (!QDir().mkpath(directory)) return fail(QStringLiteral("Couldn't create the folder ") + directory);
+            download.destinationDir = QDir::cleanPath(directory).toStdString();
+        }
+        const QString checksum = request.value("checksum").toString().trimmed();
+        if (!checksum.isEmpty()) download.expectedChecksum = checksum.toStdString();
+
+        DownloadId id = 0;
+        if (source.endsWith(QStringLiteral(".torrent"), Qt::CaseInsensitive) && QDir::isAbsolutePath(source)) {
+            // The command line's own user asked for this file, so it starts right away
+            // (a .torrent opened from elsewhere still goes through the review dialog).
+            if (!QFileInfo(source).isFile()) return fail(QStringLiteral("No such file: ") + source);
+            download.source = source.toStdString();
+            if (download.destinationDir.empty()) download.destinationDir = manager_.defaultDownloadDir().string();
+            download.maxConnections = maxConnectionsPerDownload_;
+            id = manager_.addTorrent(std::move(download));
+        } else {
+            if (!isMagnetOrUrl(source)) return fail(QStringLiteral("Only http(s) links, magnet links and .torrent files can be added"));
+            id = addLink(source, std::move(download));
+        }
+        if (id == 0) return fail(QStringLiteral("Orbit couldn't add it"));
+        ORBIT_LOG_INFO("control", "Added a download from the command line");
+        const auto snap = manager_.snapshot(id);
+        return QJsonObject{{"ok", true}, {"download", snap ? controlTaskJson(*snap) : QJsonObject{}}};
+    }
+    if (type == QLatin1String("pause") || type == QLatin1String("resume") || type == QLatin1String("cancel") ||
+        type == QLatin1String("remove")) {
+        std::vector<DownloadId> ids;
+        const bool all = request.value("all").toBool();
+        const auto snaps = manager_.snapshot();
+        if (all) {
+            for (const auto& snap : snaps) ids.push_back(snap.id);
+        } else {
+            for (const QJsonValue& value : request.value("ids").toArray()) {
+                bool ok = false;
+                const auto id = static_cast<DownloadId>(value.toString().toULongLong(&ok));
+                if (!ok || !manager_.snapshot(id)) return fail(QStringLiteral("No download with id ") + value.toString());
+                ids.push_back(id);
+            }
+        }
+        if (ids.empty()) return fail(QStringLiteral("Name the downloads by id, or use --all"));
+        int changed = 0;
+        for (const DownloadId id : ids) {
+            const auto snap = manager_.snapshot(id);
+            if (!snap) continue;
+            const DownloadState s = snap->state;
+            const bool running = s == DownloadState::Downloading || s == DownloadState::Connecting ||
+                                 s == DownloadState::Queued || s == DownloadState::Seeding;
+            if (type == QLatin1String("pause")) {
+                if (!running) continue;
+                manager_.pause(id);
+            } else if (type == QLatin1String("resume")) {
+                if (s != DownloadState::Paused && s != DownloadState::Error && s != DownloadState::Cancelled) continue;
+                manager_.resume(id);
+            } else if (type == QLatin1String("cancel")) {
+                if (s == DownloadState::Completed || s == DownloadState::Cancelled || s == DownloadState::Error) continue;
+                manager_.cancel(id);
+            } else {
+                // Like the window's Remove: active downloads stay, and files are never deleted here.
+                if (running && !all) return fail(QStringLiteral("Pause or cancel download ") + QString::number(id) + QStringLiteral(" before removing it"));
+                if (running) continue;
+                manager_.remove(id, false);
+            }
+            ++changed;
+        }
+        return QJsonObject{{"ok", true}, {"changed", changed}};
+    }
+    return fail(QStringLiteral("Unknown command"));
 }
 
 void MainWindow::setRemoteAccessEnabled(bool enabled) {
@@ -668,6 +1062,16 @@ void MainWindow::applyProxy() {
 
 void MainWindow::applyTorrentSettings() {
     manager_.torrentEngine().setSeedingLimits(seedRatioLimit_, seedTimeLimitMinutes_);
+    manager_.torrentEngine().setSeedAfterDownload(seedAfterDownload_);
+    if (!seedAfterDownload_) manager_.completeFinishedPausedTorrents();
+}
+
+void MainWindow::setSeedAfterDownload(bool seed) {
+    if (seed == seedAfterDownload_) return;
+    seedAfterDownload_ = seed;
+    QSettings().setValue("torrent/seedAfterDownload", seed);
+    applyTorrentSettings();
+    emit torrentSettingsChanged();
 }
 
 void MainWindow::setTorrentDownloadLimitKBps(int kbps) {

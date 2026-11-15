@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QHash>
 #include "core/DownloadManager.hpp"
 #include "core/Types.hpp"
 
@@ -59,6 +60,8 @@ public:
         DestinationDirRole,
         FileConflictPathRole,
         CanRefreshLinkRole,
+        SegmentsRole,
+        ThumbnailRole,
     };
     Q_ENUM(Roles)
 
@@ -138,6 +141,10 @@ private:
     void applySnapshot(const orbit::core::TaskSnapshot& snapshot);
     void applyRemoval(orbit::core::DownloadId id);
     [[nodiscard]] int rowOf(qlonglong id) const;
+    // A preview image for the row: a media download's thumbnail, or a finished picture
+    // itself. Empty when there's none.
+    [[nodiscard]] QString thumbnailFor(const orbit::core::TaskSnapshot& snap) const;
+    static QString thumbnailDir();
 
     orbit::core::DownloadManager& manager_;
     std::vector<orbit::core::TaskSnapshot> items_;
@@ -146,4 +153,8 @@ private:
     int noticeSubToken_{-1};
     int nextMediaInfoToken_{1};
     int revision_{0};
+    // Media thumbnails found so far, and the state each id was last looked up in (a
+    // missing one is looked for again only once the state changes).
+    mutable QHash<qlonglong, QString> thumbnails_;
+    mutable QHash<qlonglong, int> thumbnailCheckedState_;
 };
