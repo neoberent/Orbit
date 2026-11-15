@@ -123,6 +123,8 @@ add_library(orbit_services STATIC
     include/core/RemoteServer.hpp
     src/core/Scheduler.cpp
     include/core/Scheduler.hpp
+    src/core/UpdateFeed.cpp
+    include/core/UpdateFeed.hpp
     include/utils/LocalSocket.hpp
     src/web/webassets.qrc
 )

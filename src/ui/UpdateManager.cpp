@@ -1,4 +1,5 @@
 #include "UpdateManager.hpp"
+#include "core/UpdateFeed.hpp"
 
 #include "utils/FileUtils.hpp"
 #include "utils/Logger.hpp"
@@ -206,6 +207,27 @@ void UpdateManager::check(bool userInitiated) {
     });
 }
 
+void UpdateManager::noteLinuxNews(const orbit::core::UpdateOffer& offer) {
+    // A Linux-only release Windows users hear about once, with nothing to install.
+    const QVersionNumber seen = QVersionNumber::fromString(QSettings().value("updates/linuxNewsSeen").toString());
+    const QVersionNumber current = QVersionNumber::fromString(currentVersion());
+    if (offer.newsVersion.isNull() || offer.newsNotes.isEmpty() || offer.newsVersion <= current || offer.newsVersion <= seen) {
+        return;
+    }
+    linuxNewsVersion_ = offer.newsVersion.toString();
+    linuxNewsNotes_ = offer.newsNotes;
+    const QDate released = QDate::fromString(offer.newsReleased, Qt::ISODate);
+    linuxNewsDate_ = released.isValid() ? QLocale::c().toString(released, QStringLiteral("MMMM d, yyyy")) : QString();
+    linuxNewsPage_ = offer.page;
+    ORBIT_LOG_INFO("update", "Linux news: Orbit " + linuxNewsVersion_.toStdString());
+    emit linuxNewsFound();
+}
+
+void UpdateManager::markLinuxNewsSeen() {
+    if (linuxNewsVersion_.isEmpty()) return;
+    QSettings().setValue("updates/linuxNewsSeen", linuxNewsVersion_);
+}
+
 void UpdateManager::handleFeedReply(QNetworkReply* reply, bool userInitiated) {
     if (reply->error() != QNetworkReply::NoError) {
         const QString message = describeNetworkError(reply);
@@ -219,15 +241,17 @@ void UpdateManager::handleFeedReply(QNetworkReply* reply, bool userInitiated) {
     const QJsonDocument doc = QJsonDocument::fromJson(body, &parseError);
     const QJsonObject feed = doc.object();
 
-    const QVersionNumber latest = parseVersion(feed.value("version").toString());
-#if defined(_WIN32)
-    const QJsonObject package = feed;
+#if defined(__linux__)
+    constexpr bool kLinux = true;
 #else
-    // The top-level link is the Windows installer; Linux builds come from "linux", and a
-    // release without one isn't offered (there would be nothing to install).
-    const QJsonObject package = feed.value("linux").toObject();
-    if (doc.isObject() && !latest.isNull() && package.isEmpty()) {
-        ORBIT_LOG_INFO("update", "Version " + latest.toString().toStdString() + " has no Linux build yet");
+    constexpr bool kLinux = false;
+#endif
+    const orbit::core::UpdateOffer offer = orbit::core::readUpdateFeed(feed, kLinux);
+    if (doc.isObject() && !kLinux) noteLinuxNews(offer);
+    const QVersionNumber latest = offer.version;
+    if (kLinux && doc.isObject() && latest.isNull() && !feed.value("version").toString().isEmpty()) {
+        // A release without a Linux build: nothing to install here.
+        ORBIT_LOG_INFO("update", "The latest release has no Linux build");
         lastChecked_ = QDateTime::currentDateTime();
         QSettings().setValue("updates/lastChecked", lastChecked_);
         emit lastCheckedChanged();
@@ -239,9 +263,8 @@ void UpdateManager::handleFeedReply(QNetworkReply* reply, bool userInitiated) {
         setState(QStringLiteral("upToDate"));
         return;
     }
-#endif
-    const QUrl url(package.value("url").toString());
-    const QByteArray sha256 = package.value("sha256").toString().trimmed().toLower().toLatin1();
+    const QUrl url(offer.url);
+    const QByteArray sha256 = offer.sha256.trimmed().toLower().toLatin1();
     static const QRegularExpression hexPattern(QStringLiteral("^[0-9a-f]{64}$"));
 
     QString problem;
@@ -279,10 +302,10 @@ void UpdateManager::handleFeedReply(QNetworkReply* reply, bool userInitiated) {
     latestVersion_ = latest.toString();
     installerUrl_ = url;
     expectedSha256_ = sha256;
-    downloadSize_ = package.value("size").toInteger(0);
-    releaseNotes_ = parseNotes(feed.value("notes"));
-    releasePage_ = feed.value("page").toString();
-    const QDate released = QDate::fromString(feed.value("released").toString(), Qt::ISODate);
+    downloadSize_ = offer.size;
+    releaseNotes_ = offer.notes;
+    releasePage_ = offer.page;
+    const QDate released = QDate::fromString(offer.released, Qt::ISODate);
     releaseDate_ = released.isValid() ? QLocale::c().toString(released, QStringLiteral("MMMM d, yyyy")) : QString();
     emit releaseChanged();
 

@@ -303,10 +303,14 @@ ApplicationWindow {
         onUpdateDialogRequested: updateDialog.open()
     }
     UpdateDialog { id: updateDialog }
+    LinuxNewsDialog { id: linuxNewsDialog }
     FileConflictDialog { id: fileConflictDialog }
 
     Connections {
         target: updateManager
+        function onLinuxNewsFound() {
+            if (!updateDialog.visible) linuxNewsDialog.open()
+        }
         function onUpdateFound(userInitiated) {
             if (!userInitiated && !(window.visible && window.active))
                 trayController.notify("Update available", "Orbit " + updateManager.latestVersion + " is ready to download.", false)

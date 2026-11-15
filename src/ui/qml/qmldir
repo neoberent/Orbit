@@ -55,6 +55,7 @@ WhenDoneDialog 1.0 WhenDoneDialog.qml
 ClipboardPrompt 1.0 ClipboardPrompt.qml
 CommandPalette 1.0 CommandPalette.qml
 BatchAddDialog 1.0 BatchAddDialog.qml
+LinuxNewsDialog 1.0 LinuxNewsDialog.qml
 TabStrip 1.0 TabStrip.qml
 PieceMap 1.0 PieceMap.qml
 TorrentDetailsView 1.0 TorrentDetailsView.qml
