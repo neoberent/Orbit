@@ -13,6 +13,9 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDesktopServices>
+#include <QDrag>
+#include <QIcon>
+#include <QMimeData>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -690,6 +693,24 @@ QString MainWindow::playWhileDownloading(qlonglong id) {
         }
     }
     return QDesktopServices::openUrl(QUrl::fromLocalFile(path)) ? QString() : QStringLiteral("No video player found");
+}
+
+void MainWindow::startFileDrag(const QString& path) {
+    if (!QFileInfo(path).isFile()) return;
+    auto* mime = new QMimeData;
+    mime->setUrls({QUrl::fromLocalFile(path)});
+    auto* drag = new QDrag(this);
+    drag->setMimeData(mime);
+    const QIcon icon = QIcon::fromTheme(QStringLiteral("text-x-generic"));
+    if (!icon.isNull()) drag->setPixmap(icon.pixmap(32, 32));
+    draggingOut_ = true;
+    emit draggingOutChanged();
+    const Qt::DropAction result = drag->exec(Qt::CopyAction, Qt::CopyAction);
+    draggingOut_ = false;
+    emit draggingOutChanged();
+    ORBIT_LOG_INFO("ui", result == Qt::CopyAction ? "Dragged a file out" : "File drag ended without a drop");
+    // Not deleted here: the receiving app may still be fetching the data. It's a child
+    // of this object, and Qt cleans up a finished drag itself.
 }
 
 void MainWindow::setBlurBehind(QObject* window, bool enabled) const {

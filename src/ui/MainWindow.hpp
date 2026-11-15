@@ -246,6 +246,13 @@ public:
     Q_INVOKABLE QString toLocalFilePath(const QUrl& url) const { return url.toLocalFile(); }
     // file:// URL of a local path, properly encoded (for drag and drop).
     Q_INVOKABLE QString fileUrl(const QString& path) const { return QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded); }
+    // Starts dragging a finished file out of Orbit (into a chat, an upload field, the file
+    // manager). Returns once it was dropped or let go.
+    Q_INVOKABLE void startFileDrag(const QString& path);
+    // True while one of Orbit's own files is being dragged out, so Orbit's window doesn't
+    // offer itself as the place to drop it.
+    Q_PROPERTY(bool draggingOut READ draggingOut NOTIFY draggingOutChanged)
+    [[nodiscard]] bool draggingOut() const noexcept { return draggingOut_; }
     Q_INVOKABLE bool openDataFolder() const;
     // Opens the file's folder with the file selected.
     Q_INVOKABLE bool revealFile(const QString& path) const;
@@ -312,6 +319,7 @@ signals:
     void meteredChanged();
     void networkLimitsChanged();
     void afterDownloadChanged();
+    void draggingOutChanged();
     // An after-download action finished: ok, and a message for the user.
     void afterDownloadNotice(const QString& title, const QString& message, bool ok);
     // count downloads were paused because the connection became metered.
@@ -382,6 +390,7 @@ private:
     bool headless_{false};
     void applyTypeFolders();
 
+    bool draggingOut_{false};
     bool sortByType_{false};
     QVariantMap typeFolders_;
     bool unpackArchives_{false};

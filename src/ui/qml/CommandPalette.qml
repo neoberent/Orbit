@@ -157,13 +157,15 @@ Popup {
                         text: row.modelData.detail || ""
                         color: Theme.textTertiary
                         font.pixelSize: Theme.fontCaption
-                        elide: Text.ElideMiddle
+                        elide: Text.ElideRight
                     }
                 }
                 MouseArea {
                     anchors.fill: parent
                     hoverEnabled: true
-                    onEntered: root.current = row.index
+                    // Only a moving pointer picks a row, not one that happens to rest
+                    // where the list opens.
+                    onPositionChanged: root.current = row.index
                     onClicked: root.runCurrent()
                 }
             }

@@ -361,7 +361,11 @@ ApplicationWindow {
 
                     DropArea {
                         anchors.fill: parent
-                        onEntered: (drag) => { if (!drag.hasUrls) drag.accepted = false; else contentArea.dragActive = true }
+                        onEntered: (drag) => {
+                            // Orbit's own file being dragged out isn't something to add.
+                            if (!drag.hasUrls || appController.draggingOut) drag.accepted = false
+                            else contentArea.dragActive = true
+                        }
                         onExited: contentArea.dragActive = false
                         onDropped: (drop) => {
                             contentArea.dragActive = false

@@ -112,8 +112,19 @@ Item {
     MouseArea {
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton | Qt.RightButton
+        property point pressPoint
+        property bool pressOnTile: false
         onPressed: (mouse) => {
+            pressPoint = Qt.point(mouse.x, mouse.y)
+            const onTile = tile.mapToItem(this, 0, 0)
+            pressOnTile = mouse.button === Qt.LeftButton && mouse.x >= onTile.x - 4 && mouse.x <= onTile.x + tile.width + 4
             if (root.table) root.table.handlePress(index, taskId, mouse.modifiers, mouse.button)
+        }
+        onPositionChanged: (mouse) => {
+            if (!pressed || !pressOnTile || !tile.draggable) return
+            if (Math.abs(mouse.x - pressPoint.x) + Math.abs(mouse.y - pressPoint.y) < 8) return
+            pressOnTile = false
+            appController.startFileDrag(model.destination)
         }
         onDoubleClicked: (mouse) => {
             if (mouse.button === Qt.LeftButton && root.table) root.table.openPrimary(taskId)
@@ -138,18 +149,8 @@ Item {
             muted: model.stateLabel === "Cancelled"
 
             // A finished file can be dragged out by its tile, into a chat, an upload
-            // field or the file manager.
+            // field or the file manager (started by the row's MouseArea below).
             readonly property bool draggable: model.stateLabel === "Completed" && model.destination.length > 0
-            Drag.dragType: Drag.Automatic
-            Drag.supportedActions: Qt.CopyAction
-            Drag.mimeData: draggable ? { "text/uri-list": appController.fileUrl(model.destination) + "\r\n" } : {}
-            Drag.active: draggable && tileDrag.active
-            DragHandler {
-                id: tileDrag
-                enabled: tile.draggable
-                target: null
-                cursorShape: Qt.DragCopyCursor
-            }
             HoverHandler {
                 enabled: tile.draggable
                 cursorShape: Qt.OpenHandCursor

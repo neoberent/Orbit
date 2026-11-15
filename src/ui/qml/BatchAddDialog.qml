@@ -37,6 +37,8 @@ Dialog {
         Qt.callLater(inspect)
     }
 
+    onOpened: linksArea.forceActiveFocus()
+
     function parseLinks(text) {
         const seen = {}
         const out = []
@@ -111,7 +113,7 @@ Dialog {
             ColumnLayout {
                 Layout.fillWidth: true
                 spacing: 2
-                Text { text: "Add Many Links"; color: Theme.textPrimary; font.pixelSize: Theme.fontTitle; font.weight: Font.DemiBold }
+                Text { Layout.fillWidth: true; text: "Add Many Links"; color: Theme.textPrimary; font.pixelSize: Theme.fontTitle; font.weight: Font.DemiBold }
                 Text { text: "Paste links, one per line. Each is checked before anything starts."; color: Theme.textTertiary; font.pixelSize: Theme.fontCaption }
             }
             IconButton { iconName: "close"; tooltip: "Close"; onClicked: root.close() }
@@ -164,16 +166,28 @@ Dialog {
                 radius: Theme.radiusMedium
                 color: entryHover.hovered ? Theme.rowHover : "transparent"
                 HoverHandler { id: entryHover }
+                Accessible.role: Accessible.CheckBox
+                Accessible.name: entry.name
+                Accessible.checked: entry.checked
+                TapHandler {
+                    enabled: entry.status !== "error"
+                    onTapped: { entries.setProperty(entry.index, "checked", !entry.checked); root.countTick++ }
+                }
 
                 RowLayout {
                     anchors.fill: parent
                     anchors.leftMargin: 8
                     anchors.rightMargin: 8
                     spacing: 10
-                    CheckBox {
-                        checked: entry.checked
-                        enabled: entry.status !== "error"
-                        onToggled: { entries.setProperty(entry.index, "checked", checked); root.countTick++ }
+                    Rectangle {
+                        Layout.preferredWidth: 16
+                        Layout.preferredHeight: 16
+                        radius: 4
+                        opacity: entry.status === "error" ? 0.4 : 1
+                        color: entry.checked ? Theme.accent : "transparent"
+                        border.width: 1.4
+                        border.color: entry.checked ? Theme.accent : Theme.withAlpha(Theme.textPrimary, 0.22)
+                        Icon { anchors.centerIn: parent; visible: entry.checked; name: "check"; iconSize: 10; color: "#ffffff" }
                     }
                     FileTile {
                         size: 26
