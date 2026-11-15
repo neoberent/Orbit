@@ -16,6 +16,10 @@
 class QNetworkAccessManager;
 class QNetworkReply;
 
+namespace orbit::core {
+struct UpdateOffer;
+}
+
 class UpdateManager final : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString state READ state NOTIFY stateChanged)
@@ -31,6 +35,11 @@ class UpdateManager final : public QObject {
     Q_PROPERTY(double downloadRate READ downloadRate NOTIFY progressChanged)
     Q_PROPERTY(QDateTime lastChecked READ lastChecked NOTIFY lastCheckedChanged)
     Q_PROPERTY(bool autoCheck READ autoCheck WRITE setAutoCheck NOTIFY autoCheckChanged)
+    // Windows: a Linux-only release to tell the user about (nothing to install).
+    Q_PROPERTY(QString linuxNewsVersion READ linuxNewsVersion NOTIFY linuxNewsFound)
+    Q_PROPERTY(QStringList linuxNewsNotes READ linuxNewsNotes NOTIFY linuxNewsFound)
+    Q_PROPERTY(QString linuxNewsDate READ linuxNewsDate NOTIFY linuxNewsFound)
+    Q_PROPERTY(QString linuxNewsPage READ linuxNewsPage NOTIFY linuxNewsFound)
 
 public:
     explicit UpdateManager(QObject* parent = nullptr);
@@ -44,6 +53,12 @@ public:
     [[nodiscard]] QString releaseDate() const { return releaseDate_; }
     [[nodiscard]] QStringList releaseNotes() const { return releaseNotes_; }
     [[nodiscard]] QString releasePage() const { return releasePage_; }
+    [[nodiscard]] QString linuxNewsVersion() const { return linuxNewsVersion_; }
+    [[nodiscard]] QStringList linuxNewsNotes() const { return linuxNewsNotes_; }
+    [[nodiscard]] QString linuxNewsDate() const { return linuxNewsDate_; }
+    [[nodiscard]] QString linuxNewsPage() const { return linuxNewsPage_; }
+    // Called once the user has seen the Linux news, so it isn't shown again.
+    Q_INVOKABLE void markLinuxNewsSeen();
     [[nodiscard]] double downloadSize() const { return static_cast<double>(downloadSize_); }
     [[nodiscard]] double bytesReceived() const { return static_cast<double>(bytesReceived_); }
     [[nodiscard]] double downloadRate() const { return downloadRate_; }
@@ -68,10 +83,12 @@ signals:
     void autoCheckChanged();
     void updateFound(bool userInitiated);
     void installerLaunched();
+    void linuxNewsFound();
 
 private:
     void check(bool userInitiated);
     void handleFeedReply(QNetworkReply* reply, bool userInitiated);
+    void noteLinuxNews(const orbit::core::UpdateOffer& offer);
     void handleDownloadFinished();
     void setState(const QString& state, const QString& error = QString());
     void failDownload(const QString& message);
@@ -99,6 +116,10 @@ private:
     QString state_{QStringLiteral("idle")};
     QString errorMessage_;
     QString latestVersion_;
+    QString linuxNewsVersion_;
+    QStringList linuxNewsNotes_;
+    QString linuxNewsDate_;
+    QString linuxNewsPage_;
     QString releaseDate_;
     QStringList releaseNotes_;
     QString releasePage_;
