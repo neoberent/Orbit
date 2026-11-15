@@ -211,4 +211,43 @@ ColumnLayout {
             }
         }
     }
+
+    SettingsGroup {
+        title: "aria2-compatible interface"
+        description: "For browser add-ons, scripts and phone apps made for aria2: they can add downloads and see progress. Only reachable from this PC, and only with the secret token."
+
+        SettingsRow {
+            divider: false
+            label: "Accept aria2 connections"
+            description: appController.aria2Status
+            ToggleSwitch {
+                checked: appController.aria2Enabled
+                onToggled: appController.aria2Enabled = checked
+            }
+        }
+        SettingsRow {
+            visible: appController.aria2Enabled
+            label: "Port"
+            FormField {
+                Layout.preferredWidth: 100
+                monospace: true
+                accessibleLabel: "aria2 port"
+                text: appController.aria2Port
+                validator: IntValidator { bottom: 1024; top: 65535 }
+                onEditingFinished: appController.aria2Port = parseInt(text.length > 0 ? text : "6800")
+            }
+        }
+        SettingsRow {
+            visible: appController.aria2Enabled
+            label: "Address"
+            extra: CopyableCommand { Layout.fillWidth: true; command: "http://127.0.0.1:" + appController.aria2Port + "/jsonrpc" }
+        }
+        SettingsRow {
+            visible: appController.aria2Enabled
+            label: "Secret token"
+            description: "Enter it in the add-on or app as the RPC secret"
+            ModernButton { text: "New Token"; variant: "secondary"; onClicked: appController.newAria2Secret() }
+            extra: CopyableCommand { Layout.fillWidth: true; command: appController.aria2Secret }
+        }
+    }
 }

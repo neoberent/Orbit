@@ -74,6 +74,12 @@ class MainWindow final : public QObject {
     Q_PROPERTY(QString browserIntegrationStatus READ browserIntegrationStatus NOTIFY browserIntegrationChanged)
     Q_PROPERTY(QString chromeExtensionId READ chromeExtensionId CONSTANT)
 
+    // aria2's JSON-RPC interface for add-ons and apps written for aria2 (off by default).
+    Q_PROPERTY(bool aria2Enabled READ aria2Enabled WRITE setAria2Enabled NOTIFY aria2Changed)
+    Q_PROPERTY(int aria2Port READ aria2Port WRITE setAria2Port NOTIFY aria2Changed)
+    Q_PROPERTY(QString aria2Secret READ aria2Secret NOTIFY aria2Changed)
+    Q_PROPERTY(QString aria2Status READ aria2Status NOTIFY aria2Changed)
+
     Q_PROPERTY(bool portable READ portable CONSTANT)
 
     // Sort downloads headed for the default folder into one folder per type.
@@ -210,6 +216,14 @@ public:
 
     [[nodiscard]] bool portable() const noexcept { return portable_; }
 
+    [[nodiscard]] bool aria2Enabled() const noexcept { return aria2Enabled_; }
+    void setAria2Enabled(bool enabled);
+    [[nodiscard]] int aria2Port() const noexcept { return aria2Port_; }
+    void setAria2Port(int port);
+    [[nodiscard]] QString aria2Secret() const { return aria2Secret_; }
+    [[nodiscard]] QString aria2Status() const { return aria2Status_; }
+    Q_INVOKABLE void newAria2Secret();
+
     [[nodiscard]] bool sortByType() const noexcept { return sortByType_; }
     void setSortByType(bool enabled);
     [[nodiscard]] QVariantMap typeFolders() const { return typeFolders_; }
@@ -327,6 +341,7 @@ signals:
     void networkLimitsChanged();
     void afterDownloadChanged();
     void draggingOutChanged();
+    void aria2Changed();
     // An after-download action finished: ok, and a message for the user.
     void afterDownloadNotice(const QString& title, const QString& message, bool ok);
     // count downloads were paused because the connection became metered.
@@ -399,6 +414,12 @@ private:
     class FeedWatcher* feedWatcher_{nullptr};
     void applyTypeFolders();
 
+    void applyAria2();
+    class Aria2RpcServer* aria2_{nullptr};
+    bool aria2Enabled_{false};
+    int aria2Port_{6800};
+    QString aria2Secret_;
+    QString aria2Status_;
     bool draggingOut_{false};
     bool sortByType_{false};
     QVariantMap typeFolders_;

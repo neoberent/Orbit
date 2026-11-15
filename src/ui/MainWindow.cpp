@@ -2,6 +2,7 @@
 
 #include "BrowserIntegration.hpp"
 #include "FeedWatcher.hpp"
+#include "Aria2RpcServer.hpp"
 #include "core/ProtocolHandler.hpp"
 #include "core/RemoteServer.hpp"
 #include "core/Scheduler.hpp"
@@ -30,6 +31,7 @@
 #include <QPointer>
 #include <QProcess>
 #include <QSaveFile>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
@@ -102,8 +104,9 @@ bool isExcludedFromBackup(const QString& key) {
         "remote/username", "remote/passwordHash", "remote/passwordSalt", "remote/iterations",
         "network/proxyPassword", "updates/lastRunVersion", "updates/lastChecked",
         "ui/windowX", "ui/windowY",
-        // A command to run must never arrive from someone else's backup file.
-        "after/command",
+        // A command to run must never arrive from someone else's backup file, and the
+        // aria2 token stays on this PC.
+        "after/command", "aria2/secret",
     };
     return kExcluded.contains(key);
 }
@@ -239,6 +242,33 @@ MainWindow::MainWindow(orbit::core::DownloadManager& manager, bool portable, QOb
         unpackArchives_ = settings.value("after/unpackArchives", false).toBool();
         afterCommand_ = settings.value("after/command").toString();
     }
+
+    aria2_ = new Aria2RpcServer(manager_, [this](const QString& link, const QString& directory, QString* error) -> qulonglong {
+        orbit::core::DownloadRequest request;
+        if (!directory.isEmpty()) {
+            if (!QDir::isAbsolutePath(directory) || !QDir().mkpath(directory)) {
+                *error = QStringLiteral("The folder must be an absolute path");
+                return 0;
+            }
+            request.destinationDir = QDir::cleanPath(directory).toStdString();
+        }
+        if (link.endsWith(QStringLiteral(".torrent"), Qt::CaseInsensitive) && QDir::isAbsolutePath(link) && QFileInfo(link).isFile()) {
+            request.source = link.toStdString();
+            if (request.destinationDir.empty()) request.destinationDir = manager_.defaultDownloadDir().string();
+            request.maxConnections = maxConnectionsPerDownload_;
+            return static_cast<qulonglong>(manager_.addTorrent(std::move(request)));
+        }
+        if (!isMagnetOrUrl(link)) {
+            *error = QStringLiteral("Only http(s) and magnet links can be added");
+            return 0;
+        }
+        ORBIT_LOG_INFO("aria2", "Added a download through the aria2 interface");
+        return static_cast<qulonglong>(addLink(link, std::move(request)));
+    }, this);
+    aria2Enabled_ = settings.value("aria2/enabled", false).toBool();
+    aria2Port_ = std::clamp(settings.value("aria2/port", 6800).toInt(), 1024, 65535);
+    aria2Secret_ = unprotectSecret(settings.value("aria2/secret").toString());
+    applyAria2();
 
     networkLimits_ = settings.value("network/limits").toMap();
 #if defined(__linux__)
@@ -570,6 +600,45 @@ void MainWindow::runAfterDownload(qlonglong id) {
             ORBIT_LOG_INFO("after", "Ran the after-download command for download " + std::to_string(id));
         }
     }
+}
+
+void MainWindow::applyAria2() {
+    aria2_->stop();
+    if (!aria2Enabled_) {
+        aria2Status_ = QStringLiteral("Off");
+        emit aria2Changed();
+        return;
+    }
+    if (aria2Secret_.size() < 16) {
+        newAria2Secret();
+        return;
+    }
+    const QString error = aria2_->start(static_cast<quint16>(aria2Port_), aria2Secret_);
+    aria2Status_ = error.isEmpty() ? QStringLiteral("Listening on 127.0.0.1:%1").arg(aria2Port_) : QStringLiteral("Couldn't start: ") + error;
+    emit aria2Changed();
+}
+
+void MainWindow::setAria2Enabled(bool enabled) {
+    if (enabled == aria2Enabled_) return;
+    aria2Enabled_ = enabled;
+    QSettings().setValue("aria2/enabled", enabled);
+    applyAria2();
+}
+
+void MainWindow::setAria2Port(int port) {
+    port = std::clamp(port, 1024, 65535);
+    if (port == aria2Port_) return;
+    aria2Port_ = port;
+    QSettings().setValue("aria2/port", port);
+    applyAria2();
+}
+
+void MainWindow::newAria2Secret() {
+    QByteArray bytes(24, Qt::Uninitialized);
+    for (char& b : bytes) b = static_cast<char>(QRandomGenerator::system()->generate() & 0xFF);
+    aria2Secret_ = QString::fromLatin1(bytes.toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+    QSettings().setValue("aria2/secret", protectSecret(aria2Secret_));
+    applyAria2();
 }
 
 QString MainWindow::currentNetwork() const {
