@@ -46,6 +46,12 @@ bool revealInFileManager(const QString& filePath);
 // Windows registration, an existing default app for .torrent files is left alone.
 void registerDesktopEntry(const QString& executablePath);
 
+// Adds the extras install.sh puts in place (shell completions, the systemd user service
+// for headless mode, Dolphin and Files menus) when they're missing, from the share/ folder
+// that ships beside the program. An in-app update only replaces the program folder, so
+// this is how updated installs get them. Existing files are never overwritten.
+void installMissingExtras(const QString& appDir);
+
 // Encrypts a secret with a per-user key kept in Orbit's data folder (readable only by
 // this user), so a copied settings file doesn't reveal it.
 QString protectSecret(const QString& plain);

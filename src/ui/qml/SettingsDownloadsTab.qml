@@ -49,7 +49,7 @@ ColumnLayout {
         SettingsRow {
             label: "If the file already exists"
             description: appController.fileConflictAction === "overwrite" ? "The existing file is replaced"
-                         : appController.fileConflictAction === "rename" ? "The new file gets a numbered name, like “setup (1).exe”"
+                         : appController.fileConflictAction === "rename" ? "The new file gets a numbered name, like “" + (Theme.windows ? "setup (1).exe" : "archive (1).tar.gz") + "”"
                          : "Orbit asks whether to replace the file or keep both"
             SegmentedControl {
                 options: [{ label: "Ask", value: "ask" }, { label: "Keep both", value: "rename" }, { label: "Replace", value: "overwrite" }]

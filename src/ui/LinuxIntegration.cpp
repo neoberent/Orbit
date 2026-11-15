@@ -280,6 +280,60 @@ void registerDesktopEntry(const QString& executablePath) {
     }
 }
 
+void installMissingExtras(const QString& appDir) {
+    const QString share = appDir + QStringLiteral("/share");
+    if (!QFileInfo(share).isDir()) return;  // a build folder, or a package without extras
+    const QString exe = appDir + QStringLiteral("/orbit");
+    const QString data = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+    const QString config = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
+    // Quoted for a .desktop Exec line and for systemd, as install.sh does.
+    QString quoted = exe;
+    quoted.replace(QLatin1Char('\\'), QStringLiteral("\\\\")).replace(QLatin1Char('"'), QStringLiteral("\\\""))
+          .replace(QLatin1Char('`'), QStringLiteral("\\`")).replace(QLatin1Char('$'), QStringLiteral("\\$"));
+    const QString execPath = QLatin1Char('"') + QString(quoted).replace(QLatin1Char('%'), QStringLiteral("%%")) + QLatin1Char('"');
+    const QString plainPath = QLatin1Char('"') + quoted + QLatin1Char('"');
+
+    struct Extra {
+        QString from;
+        QString to;
+        QString orbit;  // what @ORBIT@ becomes; empty = copied as is
+        bool executable;
+        bool wanted;
+    };
+    const bool fish = !QStandardPaths::findExecutable(QStringLiteral("fish")).isEmpty();
+    const bool dolphin = !QStandardPaths::findExecutable(QStringLiteral("dolphin")).isEmpty();
+    const bool nautilus = !QStandardPaths::findExecutable(QStringLiteral("nautilus")).isEmpty();
+    const Extra extras[] = {
+        {QStringLiteral("completions/orbit.bash"), data + QStringLiteral("/bash-completion/completions/orbit"), {}, false, true},
+        {QStringLiteral("completions/_orbit"), data + QStringLiteral("/zsh/site-functions/_orbit"), {}, false, true},
+        {QStringLiteral("completions/orbit.fish"), config + QStringLiteral("/fish/completions/orbit.fish"), {}, false, fish},
+        {QStringLiteral("orbit.service"), config + QStringLiteral("/systemd/user/orbit.service"), plainPath, false, true},
+        {QStringLiteral("orbit-torrent.desktop"), data + QStringLiteral("/kio/servicemenus/orbit-torrent.desktop"), execPath, true, dolphin},
+        {QStringLiteral("orbit-links.desktop"), data + QStringLiteral("/kio/servicemenus/orbit-links.desktop"), execPath, true, dolphin},
+        {QStringLiteral("nautilus-download-with-orbit"), data + QStringLiteral("/nautilus/scripts/Download with Orbit"), plainPath, true, nautilus},
+    };
+    int added = 0;
+    for (const Extra& extra : extras) {
+        if (!extra.wanted || QFileInfo::exists(extra.to)) continue;
+        QFile in(share + QLatin1Char('/') + extra.from);
+        if (!in.open(QIODevice::ReadOnly)) continue;
+        QByteArray content = in.readAll();
+        if (!extra.orbit.isEmpty()) content.replace("@ORBIT@", extra.orbit.toUtf8());
+        QDir().mkpath(QFileInfo(extra.to).absolutePath());
+        QSaveFile out(extra.to);
+        if (!out.open(QIODevice::WriteOnly)) continue;
+        out.write(content);
+        if (!out.commit()) continue;
+        QFile::setPermissions(extra.to, extra.executable ? (QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |
+                                                            QFileDevice::ReadGroup | QFileDevice::ExeGroup | QFileDevice::ReadOther |
+                                                            QFileDevice::ExeOther)
+                                                         : (QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadGroup |
+                                                            QFileDevice::ReadOther));
+        ++added;
+    }
+    if (added > 0) ORBIT_LOG_INFO("main", "Added " + std::to_string(added) + " missing extras (completions, service, menus)");
+}
+
 QString protectSecret(const QString& plain) {
     if (plain.isEmpty()) return {};
     const QByteArray key = secretKey(true);

@@ -404,8 +404,13 @@ void MediaDownloader::launchProcess(DownloadId id) {
 
     const QString ytDlpPath = resolveYtDlpPath();
     if (ytDlpPath.isEmpty()) {
+#if defined(_WIN32)
         reporter_.reportError(id, "yt-dlp was not found. Place yt-dlp.exe next to Orbit, or install it and "
                                    "make sure it's on PATH.");
+#else
+        reporter_.reportError(id, "yt-dlp was not found. Install it with your package manager (for example "
+                                   "sudo pacman -S yt-dlp ffmpeg) and make sure it's on PATH.");
+#endif
         reporter_.reportStateChanged(id, DownloadState::Error);
         return;
     }

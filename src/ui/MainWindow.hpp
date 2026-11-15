@@ -223,6 +223,9 @@ public:
     [[nodiscard]] QString aria2Secret() const { return aria2Secret_; }
     [[nodiscard]] QString aria2Status() const { return aria2Status_; }
     Q_INVOKABLE void newAria2Secret();
+    // How to install Cloudflare's cloudflared on this system (for Remote Access tunnels):
+    // winget on Windows, the distribution's own package or Cloudflare's on Linux.
+    Q_INVOKABLE QString cloudflaredInstallCommand() const;
 
     [[nodiscard]] bool sortByType() const noexcept { return sortByType_; }
     void setSortByType(bool enabled);

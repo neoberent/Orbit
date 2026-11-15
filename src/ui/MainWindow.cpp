@@ -633,6 +633,35 @@ void MainWindow::setAria2Port(int port) {
     applyAria2();
 }
 
+QString MainWindow::cloudflaredInstallCommand() const {
+#if defined(_WIN32)
+    return QStringLiteral("winget install --id Cloudflare.cloudflared");
+#else
+    // /etc/os-release names the distribution (ID) and the ones it's based on (ID_LIKE).
+    QString ids;
+    QFile osRelease(QStringLiteral("/etc/os-release"));
+    if (osRelease.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        for (const QByteArray& line : osRelease.readAll().split('\n')) {
+            if (line.startsWith("ID=") || line.startsWith("ID_LIKE=")) {
+                ids += QLatin1Char(' ') + QString::fromUtf8(line.mid(line.indexOf('=') + 1)).remove(QLatin1Char('"')).toLower();
+            }
+        }
+    }
+    const QStringList words = ids.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    auto is = [&](const char* id) { return words.contains(QLatin1String(id)); };
+    if (is("arch")) return QStringLiteral("sudo pacman -S cloudflared");
+    if (is("debian") || is("ubuntu")) {
+        return QStringLiteral("curl -LO https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb && "
+                              "sudo apt install ./cloudflared-linux-amd64.deb");
+    }
+    if (is("fedora") || is("rhel") || is("centos")) {
+        return QStringLiteral("sudo dnf install https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-x86_64.rpm");
+    }
+    if (is("opensuse") || is("suse")) return QStringLiteral("sudo zypper install cloudflared");
+    return QStringLiteral("https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/");
+#endif
+}
+
 void MainWindow::newAria2Secret() {
     QByteArray bytes(24, Qt::Uninitialized);
     for (char& b : bytes) b = static_cast<char>(QRandomGenerator::system()->generate() & 0xFF);
@@ -1514,6 +1543,11 @@ void MainWindow::repairBrowserIntegration() {
         browserIntegrationStatus_ = QStringLiteral("Handled by the Flatpak; the extension uses orbit:// links");
         emit browserIntegrationChanged();
         return;
+    }
+    // Extras an in-app update can't add (completions, the headless service, menus), for a
+    // user install in a writable folder. A system package installs its own.
+    if (packaging.empty() && QFileInfo(QCoreApplication::applicationDirPath()).isWritable()) {
+        linux_integration::installMissingExtras(QCoreApplication::applicationDirPath());
     }
     // An AppImage runs from a temporary mount: the menu entry points at the AppImage file.
     const QString appImage = qEnvironmentVariable("APPIMAGE");

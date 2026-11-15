@@ -63,11 +63,9 @@ QList<FeedWatcher::Item> FeedWatcher::parse(const QByteArray& xml, QString* titl
     QXmlStreamReader reader(xml);
     Item current;
     bool inItem = false;
-    int depth = 0;
     while (!reader.atEnd() && !reader.hasError()) {
         reader.readNext();
         if (reader.isStartElement()) {
-            ++depth;
             const QString name = reader.name().toString().toLower();
             if (name == QLatin1String("item") || name == QLatin1String("entry")) {
                 inItem = true;
@@ -83,7 +81,6 @@ QList<FeedWatcher::Item> FeedWatcher::parse(const QByteArray& xml, QString* titl
             if (name == QLatin1String("title") || name == QLatin1String("link") || name == QLatin1String("guid") ||
                 name == QLatin1String("id") || name.contains(QLatin1String("magnet"))) {
                 const QString text = reader.readElementText(QXmlStreamReader::SkipChildElements).trimmed();
-                --depth;
                 if (!inItem) {
                     if (name == QLatin1String("title") && title && title->isEmpty()) *title = text.left(120);
                     continue;
@@ -97,7 +94,6 @@ QList<FeedWatcher::Item> FeedWatcher::parse(const QByteArray& xml, QString* titl
                 if (name == QLatin1String("link") && current.id.isEmpty()) current.id = text.left(1000);
             }
         } else if (reader.isEndElement()) {
-            --depth;
             const QString name = reader.name().toString().toLower();
             if (inItem && (name == QLatin1String("item") || name == QLatin1String("entry"))) {
                 inItem = false;

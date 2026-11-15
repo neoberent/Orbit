@@ -142,8 +142,12 @@ ColumnLayout {
                 Text { text: "Quick Tunnel"; color: Theme.textPrimary; font.pixelSize: Theme.fontBody; font.weight: Font.DemiBold }
                 StatusBadge { label: "Testing"; tone: Theme.textTertiary }
             }
-            StepText { text: "1. Install cloudflared" }
-            CopyableCommand { command: "winget install --id Cloudflare.cloudflared" }
+            readonly property string installCommand: appController.cloudflaredInstallCommand()
+            StepText {
+                text: parent.installCommand.startsWith("https://") ? "1. Install cloudflared for your system from Cloudflare's downloads page"
+                                                                   : "1. Install cloudflared"
+            }
+            CopyableCommand { command: parent.installCommand }
             StepText { text: "2. Run this in a terminal" }
             CopyableCommand { command: "cloudflared tunnel --url " + appController.remoteLocalUrl }
             StepText { text: "3. Open the printed *.trycloudflare.com link on your phone and sign in with your Orbit username and password." }
@@ -170,8 +174,11 @@ ColumnLayout {
             CopyableCommand { command: "cloudflared tunnel route dns orbit orbit.yourdomain.com" }
             StepText { text: "4. Point the tunnel's config.yml at " + appController.remoteLocalUrl + ", then run" }
             CopyableCommand { command: "cloudflared tunnel run orbit" }
-            StepText { text: "5. Optional: keep it running after a reboot" }
-            CopyableCommand { command: "cloudflared service install" }
+            StepText {
+                text: Theme.windows ? "5. Optional: keep it running after a reboot"
+                                    : "5. Optional: keep it running after a reboot (copies the tunnel's settings to /etc/cloudflared)"
+            }
+            CopyableCommand { command: Theme.windows ? "cloudflared service install" : "sudo cloudflared service install" }
             StepText { text: "6. Enter the hostname here, so Orbit answers requests for it" }
             FormField {
                 id: tunnelHostField
