@@ -70,6 +70,10 @@ public:
     // yt-dlp can only bind to an address, so it gets the interface's current one; while
     // the interface has none, media downloads fail instead of using another connection.
     void setNetworkInterface(const std::string& interfaceName);
+    // The relay that carries yt-dlp through a locked interface (DownloadManager's
+    // InterfaceRelay); it's used while the interface is locked and no proxy of the user's
+    // is set. Disabled = not running.
+    void setRelayProxy(const ProxySettings& relay);
     // "" (off), or a browser yt-dlp can read cookies from: "firefox", "chrome", "edge", "brave".
     void setCookiesFromBrowser(const QString& browser);
 
@@ -117,8 +121,14 @@ private:
 
     mutable std::mutex optionsMutex_;
     ProxySettings proxy_;
+    ProxySettings relay_;
     QString cookiesFromBrowser_;
     std::string networkInterface_;
+    // yt-dlp's environment: with the relay in use, it points the proxy variables there
+    // (rather than --proxy, so the relay's credentials don't show in the process list).
+    [[nodiscard]] QProcessEnvironment processEnvironment() const;
+    // Why yt-dlp can't run under the interface lock right now, or empty.
+    [[nodiscard]] QString lockProblem() const;
     // Empty when no interface is set; "!" when one is set but has no address right now.
     [[nodiscard]] QString sourceAddress() const;
 };

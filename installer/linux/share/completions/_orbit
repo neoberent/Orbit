@@ -15,10 +15,12 @@ _orbit() {
         'status:Totals and current speeds'
         'pause:Pause downloads'
         'resume:Resume downloads'
-        'cancel:Cancel downloads'
+        'cancel:Stop unfinished downloads and delete their partial files'
         'remove:Remove downloads from the list'
         'show:Open the window'
         'feeds:Torrent RSS feeds'
+        'config:Show or change settings'
+        'remote:Web dashboard: status, on/off, sign-in'
         'help:Show help'
     )
     if (( CURRENT == 2 )); then
@@ -37,6 +39,8 @@ _orbit() {
         pause|resume|cancel) _arguments '(-a --all)'{-a,--all}'[every download]' '*:download:_orbit_ids' ;;
         remove|rm) _arguments '*:download:_orbit_ids' ;;
         list|ls|status) _arguments '--json[print JSON]' ;;
+        config) _arguments '1:action:(list get set)' '2:setting:(${(f)"$(orbit config list --json 2>/dev/null | sed -n "s/.*\"name\": \"\\([^\"]*\\)\".*/\\1/p")"})' '--json[print JSON]' ;;
+        remote) _arguments '1:action:(status enable disable set-password)' '--json[print JSON]' ;;
         feeds) _arguments '1:action:(add remove check)' '--filter[words a title must contain]:words:' '(-d --dir)'{-d,--dir}'[save in this folder]:folder:_directories' '--json[print JSON]' ;;
     esac
 }

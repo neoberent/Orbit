@@ -1,5 +1,7 @@
 #include "core/InterfaceDns.hpp"
 
+#include "core/HttpDownloader.hpp"
+
 #include "utils/Logger.hpp"
 
 #include <curl/curl.h>
@@ -57,6 +59,7 @@ bool exchange(const char* resolver, const std::string& query, const std::string&
     headers = curl_slist_append(headers, "Content-Type: application/dns-message");
     headers = curl_slist_append(headers, "Accept: application/dns-message");
     curl_easy_setopt(curl, CURLOPT_URL, resolver);
+    HttpDownloader::applyTrustStore(curl);
     curl_easy_setopt(curl, CURLOPT_INTERFACE, binding.c_str());
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, query.data());

@@ -65,6 +65,12 @@ class MainWindow final : public QObject {
     Q_PROPERTY(int seedTimeLimitMinutes READ seedTimeLimitMinutes WRITE setSeedTimeLimitMinutes NOTIFY torrentSettingsChanged)
     Q_PROPERTY(bool seedAfterDownload READ seedAfterDownload WRITE setSeedAfterDownload NOTIFY torrentSettingsChanged)
     Q_PROPERTY(bool noCowOnBtrfs READ noCowOnBtrfs WRITE setNoCowOnBtrfs NOTIFY torrentSettingsChanged)
+    Q_PROPERTY(int torrentListenPort READ torrentListenPort WRITE setTorrentListenPort NOTIFY torrentSettingsChanged)
+    Q_PROPERTY(bool addPublicTrackers READ addPublicTrackers WRITE setAddPublicTrackers NOTIFY torrentSettingsChanged)
+    // Failed downloads (dropped connections, timeouts, 5xx) try again by themselves this
+    // many times, this many seconds apart. 0 = off.
+    Q_PROPERTY(int autoRetryCount READ autoRetryCount WRITE setAutoRetryCount NOTIFY autoRetryChanged)
+    Q_PROPERTY(int autoRetryDelaySeconds READ autoRetryDelaySeconds WRITE setAutoRetryDelaySeconds NOTIFY autoRetryChanged)
     Q_PROPERTY(bool downloadsOnBtrfs READ downloadsOnBtrfs NOTIFY downloadDirectoryChanged)
 
     Q_PROPERTY(QString mediaCookiesBrowser READ mediaCookiesBrowser WRITE setMediaCookiesBrowser NOTIFY mediaSettingsChanged)
@@ -200,6 +206,17 @@ public:
     [[nodiscard]] bool seedAfterDownload() const noexcept { return seedAfterDownload_; }
     void setSeedAfterDownload(bool seed);
     [[nodiscard]] bool noCowOnBtrfs() const noexcept { return noCowOnBtrfs_; }
+    [[nodiscard]] int torrentListenPort() const noexcept { return torrentListenPort_; }
+    void setTorrentListenPort(int port);
+    [[nodiscard]] bool addPublicTrackers() const noexcept { return addPublicTrackers_; }
+    void setAddPublicTrackers(bool add);
+    [[nodiscard]] int autoRetryCount() const noexcept { return autoRetryCount_; }
+    void setAutoRetryCount(int count);
+    [[nodiscard]] int autoRetryDelaySeconds() const noexcept { return autoRetryDelaySeconds_; }
+    void setAutoRetryDelaySeconds(int seconds);
+    // Called when a download ends; schedules another try if it failed for a reason a
+    // later attempt can fix (see autoRetryCount).
+    void retryIfWorthIt(qlonglong id);
     void setNoCowOnBtrfs(bool enabled);
     [[nodiscard]] bool downloadsOnBtrfs() const;
     void setSeedTimeLimitMinutes(int minutes);
@@ -305,6 +322,8 @@ public:
     // Handles a request from the `orbit` command line (its own socket, which the browser
     // helper can't reach): add, list, pause, resume, cancel, remove, show, status.
     QJsonObject handleControlRequest(const QJsonObject& request);
+    // `orbit config list|get|set`: the settings Settings in the window changes.
+    QJsonObject handleConfigRequest(const QJsonObject& request);
 
     // Writes settings (and optionally the download list) to a JSON file. Passwords and
     // browser cookies are never included. Returns an error message, or an empty string.
@@ -336,6 +355,7 @@ signals:
     void speedRuleActiveChanged();
     void proxyChanged();
     void torrentSettingsChanged();
+    void autoRetryChanged();
     void mediaSettingsChanged();
     void browserIntegrationChanged();
     void quitRequested();
@@ -402,6 +422,10 @@ private:
     int seedTimeLimitMinutes_{0};
     bool seedAfterDownload_{false};
     bool noCowOnBtrfs_{true};
+    int torrentListenPort_{51413};
+    bool addPublicTrackers_{true};
+    int autoRetryCount_{3};
+    int autoRetryDelaySeconds_{30};
 
     QString mediaCookiesBrowser_;
     QString fileConflictAction_{QStringLiteral("ask")};

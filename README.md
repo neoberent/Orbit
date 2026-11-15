@@ -84,7 +84,9 @@ The code is split into two static libraries and the GUI:
   falls back to the normal connection. Direct downloads look up host names as DNS over HTTPS
   (Quad9, then Cloudflare, by IP) through that interface and never ask the system resolver;
   the DHT's bootstrap routers are looked up the same way, and automatic update checks pause.
-  Torrent trackers and yt-dlp still use the system resolver.
+  yt-dlp and HTTP(S) trackers go through a small relay inside Orbit (127.0.0.1, its own
+  credentials) that looks names up the same way and binds every connection to the interface;
+  UDP trackers get addresses looked up through it. Web seeds and UPnP/NAT-PMP wait while it's on.
 - **Per-network limits** (Linux): a download limit that applies only on the network you're
   on (NetworkManager's name for it, e.g. a café's Wi-Fi), remembered per network.
 - **Metered connections** (Linux): downloads and seeding pause while NetworkManager reports the
@@ -93,10 +95,17 @@ The code is split into two static libraries and the GUI:
 - **Command line** (Linux): `orbit add <link|file.torrent> [-d folder] [-i links.txt]`,
   `orbit list`, `orbit status`, `orbit pause|resume|cancel <id>|--all`, `orbit remove <id>`,
   `orbit show`, all with `--json` where it makes sense. Adding starts Orbit in the tray if it
-  isn't running. Completions for bash, zsh and fish are installed with Orbit.
+  isn't running. `orbit config list|get|set` reads and changes the same settings as the
+  Settings page (e.g. `orbit config set torrentListenPort 51820`), and `orbit remote
+  status|enable|disable|set-password <user>` sets up the web dashboard without a window.
+  Completions for bash, zsh and fish are installed with Orbit.
 - **Headless mode**: `orbit --headless` runs without any window or tray (no display needed),
   controlled by the command line and the web dashboard; `orbit.service` runs it as a systemd
   user service. `orbit --background` starts the normal app in the tray.
+- **Retries**: failed downloads (dropped connections, timeouts, busy servers) try again by
+  themselves, 3 times by default and a little later each time (Settings > Downloads).
+- **Torrent port**: the listening port is a setting (Settings > Torrents), for VPNs that
+  forward one port; adding public trackers to public torrents can be turned off there too.
 - **Finding and adding**: Ctrl+K opens a command palette (commands, settings pages, any
   download by name, or a pasted link); several links pasted at once open Add Many Links,
   which checks each one first (name, size, already downloaded?). Mirrors (other links to the
@@ -327,7 +336,6 @@ With none set, the build still works and produces an unsigned installer (with a 
   (a paused/resumed download restarts from byte 0).
 - The "file already exists" choice applies to direct downloads; media downloads keep yt-dlp's
   own behaviour of not downloading a video that is already there.
-- No CLI/headless front end ships yet, though `orbit_core` has no GUI dependency and can host one.
 - macOS packaging is not set up yet. The Linux archive uses the distribution's Qt 6 and
   libtorrent rather than bundling them.
 - On GNOME under Wayland, links copied while Orbit is in the background aren't noticed

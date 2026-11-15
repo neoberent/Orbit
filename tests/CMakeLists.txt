@@ -19,3 +19,11 @@ orbit_add_test(tst_utils orbit_services)
 orbit_add_test(tst_httpdownloader orbit_core)
 orbit_add_test(tst_downloadmanager orbit_core)
 orbit_add_test(tst_remoteserver orbit_services)
+
+# The aria2 interface and the feed watcher are part of the app, not a library, so this
+# test builds their sources itself.
+orbit_add_test(tst_ui orbit_services)
+target_sources(tst_ui PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/ui/Aria2RpcServer.cpp ${PROJECT_SOURCE_DIR}/src/ui/Aria2RpcServer.hpp
+    ${PROJECT_SOURCE_DIR}/src/ui/FeedWatcher.cpp ${PROJECT_SOURCE_DIR}/src/ui/FeedWatcher.hpp)
+target_include_directories(tst_ui PRIVATE ${PROJECT_SOURCE_DIR}/src/ui)

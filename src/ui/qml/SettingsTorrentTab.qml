@@ -109,6 +109,30 @@ ColumnLayout {
     }
 
     SettingsGroup {
+        title: "Connection"
+        SettingsRow {
+            label: "Listening port"
+            description: "Peers reach this PC on this port (TCP and UDP). If your VPN forwards a port, enter that one."
+            FormField {
+                Layout.preferredWidth: 100
+                text: appController.torrentListenPort
+                validator: IntValidator { bottom: 1024; top: 65535 }
+                accessibleLabel: "Listening port"
+                onEditingFinished: if (field.acceptableInput) appController.torrentListenPort = parseInt(text)
+            }
+        }
+        SettingsRow {
+            divider: false
+            label: "Add public trackers"
+            description: "Also announce public torrents to well-known open trackers, for more peers. Private torrents never are."
+            ToggleSwitch {
+                checked: appController.addPublicTrackers
+                onToggled: appController.addPublicTrackers = checked
+            }
+        }
+    }
+
+    SettingsGroup {
         visible: appController.downloadsOnBtrfs
         title: "Disk"
         SettingsRow {

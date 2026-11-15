@@ -23,6 +23,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QMetaProperty>
 #include <QJsonDocument>
 #include <QLocale>
 #include <QNetworkInformation>
@@ -176,6 +177,12 @@ MainWindow::MainWindow(orbit::core::DownloadManager& manager, bool portable, QOb
     seedTimeLimitMinutes_ = settings.value("torrent/seedTimeLimitMinutes", 0).toInt();
     seedAfterDownload_ = settings.value("torrent/seedAfterDownload", false).toBool();
     noCowOnBtrfs_ = settings.value("torrent/noCowOnBtrfs", true).toBool();
+    torrentListenPort_ = std::clamp(settings.value("torrent/listenPort", 51413).toInt(), 1024, 65535);
+    addPublicTrackers_ = settings.value("torrent/addPublicTrackers", true).toBool();
+    manager_.torrentEngine().setListenPort(torrentListenPort_);
+    manager_.torrentEngine().setAddPublicTrackers(addPublicTrackers_);
+    autoRetryCount_ = std::clamp(settings.value("downloads/autoRetryCount", 3).toInt(), 0, 20);
+    autoRetryDelaySeconds_ = std::clamp(settings.value("downloads/autoRetryDelaySeconds", 30).toInt(), 5, 3600);
     applyTorrentSettings();
 
     mediaCookiesBrowser_ = settings.value("media/cookiesFromBrowser").toString();
@@ -243,8 +250,12 @@ MainWindow::MainWindow(orbit::core::DownloadManager& manager, bool portable, QOb
         afterCommand_ = settings.value("after/command").toString();
     }
 
-    aria2_ = new Aria2RpcServer(manager_, [this](const QString& link, const QString& directory, QString* error) -> qulonglong {
+    aria2_ = new Aria2RpcServer(manager_, [this](const QStringList& links, const QString& directory, QString* error) -> qulonglong {
+        const QString link = links.value(0);
         orbit::core::DownloadRequest request;
+        for (const QString& mirror : links.mid(1)) {
+            if (isHttpUrl(mirror)) request.mirrors.push_back(mirror.toStdString());
+        }
         if (!directory.isEmpty()) {
             if (!QDir::isAbsolutePath(directory) || !QDir().mkpath(directory)) {
                 *error = QStringLiteral("The folder must be an absolute path");
@@ -368,6 +379,8 @@ namespace {
 // lookups, a bound interface that was down. Not a 4xx answer, a bad checksum or a full
 // disk, which would only fail the same way again.
 bool failedForNetworkReasons(const std::string& error) {
+    // "Slow down" and "took too long" are 4xx answers that a later try usually gets past.
+    if (error.find("HTTP 429") != std::string::npos || error.find("HTTP 408") != std::string::npos) return true;
     static const char* const kPermanent[] = {"HTTP 4", "free space", "checksum", "Could not create destination",
                                              "yt-dlp was not found", "Unsupported URL", "Video unavailable",
                                              "Private video", "Sign in"};
@@ -393,6 +406,34 @@ void MainWindow::retryAfterReconnect() {
         ++retried;
     }
     if (retried > 0) ORBIT_LOG_INFO("network", "Back online; retrying " + std::to_string(retried) + " failed downloads");
+}
+
+void MainWindow::retryIfWorthIt(qlonglong rawId) {
+    const auto id = static_cast<orbit::core::DownloadId>(rawId);
+    const auto snap = manager_.snapshot(id);
+    if (!snap) return;
+    if (snap->state == orbit::core::DownloadState::Completed) {
+        autoRetries_.erase(id);
+        return;
+    }
+    // Torrents keep looking for peers by themselves; checksum mismatches, 4xx answers and
+    // full disks would only fail the same way again.
+    if (snap->state != orbit::core::DownloadState::Error || snap->type == orbit::core::DownloadType::Torrent ||
+        snap->checksumState == orbit::core::ChecksumState::Mismatch || !failedForNetworkReasons(snap->errorMessage)) {
+        return;
+    }
+    int& tries = autoRetries_[id];
+    if (tries >= autoRetryCount_) return;
+    ++tries;
+    // A little longer each time, so a server that's down gets some room.
+    const int delay = autoRetryDelaySeconds_ * tries;
+    ORBIT_LOG_INFO("retry", "Download " + std::to_string(id) + " failed (" + snap->errorMessage + "); trying again in " +
+                                std::to_string(delay) + " s (" + std::to_string(tries) + " of " + std::to_string(autoRetryCount_) + ")");
+    QTimer::singleShot(delay * 1000, this, [this, id] {
+        // Only if it's still failed: the user may have retried, removed or cancelled it.
+        const auto now = manager_.snapshot(id);
+        if (now && now->state == orbit::core::DownloadState::Error) manager_.resume(id);
+    });
 }
 
 void MainWindow::applyMeteredState() {
@@ -538,6 +579,15 @@ void MainWindow::setAfterCommand(const QString& command) {
 void MainWindow::runAfterDownload(qlonglong id) {
     const auto snap = manager_.snapshot(static_cast<orbit::core::DownloadId>(id));
     if (!snap || snap->state != orbit::core::DownloadState::Completed || snap->destinationPath.empty()) return;
+    // A web page chose this file (orbit:// link): it's never unpacked or handed to the
+    // user's command, which may trust what it's given.
+    if (snap->options.fromWebLink) {
+        if (unpackArchives_ || !afterCommand_.isEmpty()) {
+            ORBIT_LOG_INFO("after", "Skipped the after-download actions for download " + std::to_string(id) +
+                                        " (added by a link on a web page)");
+        }
+        return;
+    }
     // A file that failed its checksum is left alone; one still being checked waits.
     if (snap->checksumState == orbit::core::ChecksumState::Mismatch) return;
     if (snap->checksumState == orbit::core::ChecksumState::Pending ||
@@ -1017,7 +1067,9 @@ QString MainWindow::addFromExternalSource(const QString& source) {
     }
 
     if (offerToLinkCapture(trimmed, {})) return trimmed;
-    addLink(trimmed, {});
+    orbit::core::DownloadRequest request;
+    request.fromWebLink = true;
+    addLink(trimmed, std::move(request));
     emit externalDownloadAdded(trimmed);
     return trimmed;
 }
@@ -1132,6 +1184,25 @@ QJsonObject MainWindow::handleControlRequest(const QJsonObject& request) {
     if (type == QLatin1String("show")) {
         emit showWindowRequested();
         return QJsonObject{{"ok", true}};
+    }
+    if (type == QLatin1String("config")) return handleConfigRequest(request);
+    if (type == QLatin1String("remote")) {
+        const QString action = request.value("action").toString();
+        if (action == QLatin1String("set-password")) {
+            const QString user = request.value("username").toString().trimmed();
+            const QString password = request.value("password").toString();
+            if (user.isEmpty()) return fail(QStringLiteral("Give a username"));
+            if (password.size() < 8) return fail(QStringLiteral("The password needs at least 8 characters"));
+            if (!setRemoteCredentials(user, password)) return fail(QStringLiteral("Couldn't save the sign-in"));
+            ORBIT_LOG_INFO("control", "Remote access sign-in set from the command line");
+        } else if (action == QLatin1String("enable") || action == QLatin1String("disable")) {
+            setRemoteAccessEnabled(action == QLatin1String("enable"));
+        } else if (action != QLatin1String("status")) {
+            return fail(QStringLiteral("Unknown remote action (status, enable, disable, set-password)"));
+        }
+        return QJsonObject{{"ok", true}, {"enabled", remoteAccessEnabled_}, {"running", remoteRunning()},
+                           {"username", remoteUsername()}, {"configured", remoteCredentialsConfigured()},
+                           {"url", remoteLocalUrl()}, {"tunnelHosts", remoteTunnelHost_}, {"message", remoteStatusMessage_}};
     }
     if (type == QLatin1String("list") || type == QLatin1String("status")) {
         QJsonArray tasks;
@@ -1248,6 +1319,76 @@ QJsonObject MainWindow::handleControlRequest(const QJsonObject& request) {
         return QJsonObject{{"ok", true}, {"changed", changed}};
     }
     return fail(QStringLiteral("Unknown command"));
+}
+
+namespace {
+
+// The settings `orbit config` can change: this object's writable properties of a plain
+// type, which are exactly what Settings in the window changes (with the same checks).
+bool isConfigProperty(const QMetaProperty& property) {
+    if (!property.isReadable() || !property.isWritable()) return false;
+    const int type = property.metaType().id();
+    return type == QMetaType::Bool || type == QMetaType::Int || type == QMetaType::Double || type == QMetaType::QString;
+}
+
+QJsonValue configValue(const QVariant& value) {
+    switch (value.metaType().id()) {
+        case QMetaType::Bool: return value.toBool();
+        case QMetaType::Int: return value.toInt();
+        case QMetaType::Double: return value.toDouble();
+        default: return value.toString();
+    }
+}
+
+}
+
+QJsonObject MainWindow::handleConfigRequest(const QJsonObject& request) {
+    auto fail = [](const QString& message) { return QJsonObject{{"ok", false}, {"error", message}}; };
+    const QString action = request.value("action").toString(QStringLiteral("list"));
+    const QString name = request.value("name").toString();
+    const QMetaObject* meta = metaObject();
+
+    if (action == QLatin1String("list")) {
+        QJsonArray settings;
+        for (int i = meta->propertyOffset(); i < meta->propertyCount(); ++i) {
+            const QMetaProperty property = meta->property(i);
+            if (!isConfigProperty(property)) continue;
+            settings.append(QJsonObject{{"name", QString::fromLatin1(property.name())},
+                                        {"type", QString::fromLatin1(property.typeName())},
+                                        {"value", configValue(property.read(this))}});
+        }
+        return QJsonObject{{"ok", true}, {"settings", settings}};
+    }
+
+    const int index = meta->indexOfProperty(name.toLatin1().constData());
+    if (index < meta->propertyOffset() || !isConfigProperty(meta->property(index))) {
+        return fail(QStringLiteral("No setting called \"%1\" (see orbit config list)").arg(name));
+    }
+    const QMetaProperty property = meta->property(index);
+    if (action == QLatin1String("set")) {
+        const QString text = request.value("value").toString().trimmed();
+        QVariant value;
+        bool ok = true;
+        switch (property.metaType().id()) {
+            case QMetaType::Bool: {
+                const QString lower = text.toLower();
+                const bool on = lower == "true" || lower == "on" || lower == "yes" || lower == "1";
+                ok = on || lower == "false" || lower == "off" || lower == "no" || lower == "0";
+                value = on;
+                break;
+            }
+            case QMetaType::Int: value = text.toInt(&ok); break;
+            case QMetaType::Double: value = text.toDouble(&ok); break;
+            default: value = request.value("value").toString(); break;
+        }
+        if (!ok) return fail(QStringLiteral("\"%1\" isn't a valid %2").arg(text, QString::fromLatin1(property.typeName())));
+        property.write(this, value);
+        ORBIT_LOG_INFO("control", "Setting " + name.toStdString() + " changed from the command line");
+    } else if (action != QLatin1String("get")) {
+        return fail(QStringLiteral("Unknown config action (list, get, set)"));
+    }
+    // The value as it stands now: a setter may have clamped or refused it.
+    return QJsonObject{{"ok", true}, {"name", name}, {"value", configValue(property.read(this))}};
 }
 
 void MainWindow::setRemoteAccessEnabled(bool enabled) {
@@ -1455,6 +1596,39 @@ void MainWindow::setNoCowOnBtrfs(bool enabled) {
     emit torrentSettingsChanged();
 }
 
+void MainWindow::setTorrentListenPort(int port) {
+    port = std::clamp(port, 1024, 65535);
+    if (port == torrentListenPort_) return;
+    torrentListenPort_ = port;
+    QSettings().setValue("torrent/listenPort", port);
+    manager_.torrentEngine().setListenPort(port);
+    emit torrentSettingsChanged();
+}
+
+void MainWindow::setAddPublicTrackers(bool add) {
+    if (add == addPublicTrackers_) return;
+    addPublicTrackers_ = add;
+    QSettings().setValue("torrent/addPublicTrackers", add);
+    manager_.torrentEngine().setAddPublicTrackers(add);
+    emit torrentSettingsChanged();
+}
+
+void MainWindow::setAutoRetryCount(int count) {
+    count = std::clamp(count, 0, 20);
+    if (count == autoRetryCount_) return;
+    autoRetryCount_ = count;
+    QSettings().setValue("downloads/autoRetryCount", count);
+    emit autoRetryChanged();
+}
+
+void MainWindow::setAutoRetryDelaySeconds(int seconds) {
+    seconds = std::clamp(seconds, 5, 3600);
+    if (seconds == autoRetryDelaySeconds_) return;
+    autoRetryDelaySeconds_ = seconds;
+    QSettings().setValue("downloads/autoRetryDelaySeconds", seconds);
+    emit autoRetryChanged();
+}
+
 bool MainWindow::downloadsOnBtrfs() const {
     return orbit::core::TorrentEngine::isOnBtrfs(downloadDirectory().toStdString());
 }
@@ -1618,6 +1792,21 @@ QVariantMap MainWindow::importBackup(const QString& path, bool includeDownloads)
     const QJsonObject values = root.value("settings").toObject();
     for (auto it = values.begin(); it != values.end(); ++it) {
         if (isExcludedFromBackup(it.key())) continue;
+        if (it.key() == QLatin1String("feeds/list")) {
+            // A feed downloads by itself, so one from a backup file must not choose its own
+            // folder (a crafted file could aim it at ~/.config/autostart), and starts
+            // unprimed: what it lists now is only remembered, never downloaded.
+            QJsonArray feeds;
+            for (const QJsonValue& value : QJsonDocument::fromJson(it.value().toString().toUtf8()).array()) {
+                QJsonObject feed = value.toObject();
+                feed.remove(QStringLiteral("directory"));
+                feed.insert(QStringLiteral("primed"), false);
+                feeds.append(feed);
+            }
+            settings.setValue(it.key(), QJsonDocument(feeds).toJson(QJsonDocument::Compact));
+            ++restored;
+            continue;
+        }
         settings.setValue(it.key(), it.value().toVariant());
         ++restored;
     }
@@ -1629,8 +1818,14 @@ QVariantMap MainWindow::importBackup(const QString& path, bool includeDownloads)
         for (const QJsonValue& value : root.value("downloads").toArray()) {
             const QJsonObject task = value.toObject();
             orbit::core::DownloadManager::TaskRecord record;
+            // Resuming an unfinished download truncates the file at its path, and cancelling
+            // deletes it, so a path from a backup file is only kept for finished downloads
+            // (for Open and Show in Folder). The others pick their file afresh when resumed.
+            const bool finished = task.value("state").toString() == QLatin1String("Completed");
             for (auto it = task.begin(); it != task.end(); ++it) {
                 if (it.key() == QLatin1String("cookie") || it.key() == QLatin1String("id")) continue;
+                if (it.key() == QLatin1String("fileConflictPath")) continue;
+                if (it.key() == QLatin1String("destinationPath") && !finished) continue;
                 record.emplace_back(it.key().toStdString(), it.value().toString().toStdString());
             }
             records.push_back(std::move(record));

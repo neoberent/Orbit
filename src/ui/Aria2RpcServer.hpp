@@ -27,9 +27,10 @@ class Aria2RpcServer final : public QObject {
     Q_OBJECT
 
 public:
-    // Adds a link (http(s), magnet or a local .torrent path) to a folder ("" = default),
-    // returning the new download's id, or 0 with an error.
-    using AddLink = std::function<qulonglong(const QString& link, const QString& directory, QString* error)>;
+    // Adds links (http(s), magnet or a local .torrent path) to a folder ("" = default),
+    // returning the new download's id, or 0 with an error. The first link is the download;
+    // any others are mirrors of the same file (aria2 clients send them together).
+    using AddLink = std::function<qulonglong(const QStringList& links, const QString& directory, QString* error)>;
 
     Aria2RpcServer(orbit::core::DownloadManager& manager, AddLink addLink, QObject* parent = nullptr);
     ~Aria2RpcServer() override;

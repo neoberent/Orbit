@@ -3,6 +3,8 @@
 #include <QJsonArray>
 #include <QRegularExpression>
 
+#include <openssl/evp.h>
+
 namespace orbit::core {
 
 namespace {
@@ -46,8 +48,10 @@ UpdateOffer readUpdateFeed(const QJsonObject& feed, bool forLinux) {
         offer.size = linux.value("size").toInteger(0);
         offer.notes = parseReleaseNotes(own && linux.contains("notes") ? linux.value("notes") : feed.value("notes"));
         offer.released = (own && linux.contains("released") ? linux.value("released") : feed.value("released")).toString();
+        offer.signature = linux.value("signature").toString();
         return offer;
     }
+    offer.signature = feed.value("signature").toString();
     offer.version = versionOf(feed.value("version"));
     offer.url = feed.value("url").toString();
     offer.sha256 = feed.value("sha256").toString();
@@ -59,6 +63,32 @@ UpdateOffer readUpdateFeed(const QJsonObject& feed, bool forLinux) {
     offer.newsNotes = parseReleaseNotes(news.value("notes"));
     offer.newsReleased = news.value("released").toString();
     return offer;
+}
+
+}
+
+namespace orbit::core {
+
+QByteArray updateSignedMessage(const UpdateOffer& offer, bool forLinux) {
+    return "orbit-update-v1\n" + QByteArray(forLinux ? "linux" : "windows") + "\n" + offer.version.toString().toUtf8() + "\n" +
+           offer.url.toUtf8() + "\n" + offer.sha256.trimmed().toLower().toUtf8() + "\n";
+}
+
+bool verifyUpdateSignature(const UpdateOffer& offer, bool forLinux, const QByteArray& publicKey) {
+    const QByteArray signature = QByteArray::fromBase64(offer.signature.trimmed().toLatin1());
+    if (publicKey.size() != 32 || signature.size() != 64 || offer.version.isNull()) return false;
+    EVP_PKEY* key = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr,
+                                                reinterpret_cast<const unsigned char*>(publicKey.constData()), 32);
+    if (!key) return false;
+    const QByteArray message = updateSignedMessage(offer, forLinux);
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    const bool ok = ctx && EVP_DigestVerifyInit(ctx, nullptr, nullptr, nullptr, key) == 1 &&
+                    EVP_DigestVerify(ctx, reinterpret_cast<const unsigned char*>(signature.constData()), 64,
+                                     reinterpret_cast<const unsigned char*>(message.constData()),
+                                     static_cast<size_t>(message.size())) == 1;
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(key);
+    return ok;
 }
 
 }

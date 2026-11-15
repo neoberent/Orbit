@@ -69,6 +69,7 @@ private:
     bool hasShownTrayHint_{false};
     QIcon baseIcon_;
     int shownProgressStep_{-1};
+    int launcherStep_{-2};  // last progress step sent to the taskbar entry (-2 = none yet)
     QColor shownProgressColor_;
     QStringList offeredLinks_;
     DesktopNotifications* desktopNotifications_{nullptr};

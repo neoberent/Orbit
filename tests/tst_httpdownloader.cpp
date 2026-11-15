@@ -417,6 +417,86 @@ private slots:
         QCOMPARE(readFile(rec.path(1)), second);
     }
 
+    // A file replaced by another of the same size (a new nightly build) gives itself away
+    // by its Last-Modified or ETag; finishing with the old parts would splice two files.
+    // Checked both on a plain resume and from the resume data a new start reads.
+    void replacedFileOfTheSameSizeStartsOver_data() {
+        QTest::addColumn<bool>("fromDisk");
+        QTest::addColumn<QByteArray>("before");
+        QTest::addColumn<QByteArray>("after");
+        QTest::newRow("last-modified") << false << QByteArray("Last-Modified: Sat, 14 Nov 2026 10:00:00 GMT")
+                                       << QByteArray("Last-Modified: Sun, 15 Nov 2026 10:00:00 GMT");
+        QTest::newRow("etag") << false << QByteArray("ETag: \"build-1\"") << QByteArray("ETag: \"build-2\"");
+        QTest::newRow("etag, from resume data") << true << QByteArray("ETag: \"build-1\"") << QByteArray("ETag: \"build-2\"");
+    }
+
+    void replacedFileOfTheSameSizeStartsOver() {
+        QFETCH(bool, fromDisk);
+        QFETCH(QByteArray, before);
+        QFETCH(QByteArray, after);
+        const QByteArray first = randomPayload(3 * 1024 * 1024);
+        server_->setBehaviour({.payload = first, .bytesPerTick = 16 * 1024, .extraHeaders = before});
+        QTemporaryDir dir;
+        Recorder rec;
+        auto dl = std::make_unique<HttpDownloader>(rec.reporter());
+        dl->start(1, request(dir));
+        QVERIFY(rec.waitForBytes(1, 256 * 1024));
+        dl->pause(1);
+        QVERIFY(rec.waitForState(1, DownloadState::Paused));
+        const fs::path file = rec.path(1);
+
+        const QByteArray second = randomPayload(first.size());  // same size, other bytes
+        server_->setBehaviour({.payload = second, .extraHeaders = after});
+        if (fromDisk) {
+            dl = std::make_unique<HttpDownloader>(rec.reporter());
+            DownloadRequest resumed = request(dir);
+            resumed.existingFilePath = file.string();
+            dl->start(2, resumed);
+            QVERIFY2(rec.waitForState(2, DownloadState::Completed), rec.error(2).c_str());
+            QCOMPARE(readFile(rec.path(2)), second);
+        } else {
+            dl->resume(1);
+            QVERIFY2(rec.waitForState(1, DownloadState::Completed), rec.error(1).c_str());
+            QCOMPARE(readFile(rec.path(1)), second);
+        }
+    }
+
+    // Resume data whose parts don't cover the file exactly (damaged, or edited) used to
+    // fail every retry with "closed early"; now the download simply starts over.
+    void damagedResumeDataStartsOver() {
+        const QByteArray payload = randomPayload(2 * 1024 * 1024);
+        server_->setBehaviour({.payload = payload, .bytesPerTick = 16 * 1024});
+        QTemporaryDir dir;
+        Recorder rec;
+        fs::path file;
+        {
+            HttpDownloader dl(rec.reporter());
+            dl.start(1, request(dir, "file.bin", 2));
+            QVERIFY(rec.waitForBytes(1, 128 * 1024));
+            dl.pause(1);
+            QVERIFY(rec.waitForState(1, DownloadState::Paused));
+            file = rec.path(1);
+        }
+        // Overlapping parts that stop short of the end.
+        const fs::path meta = fs::path(file).concat(".orbitresume");
+        std::string kept;
+        {
+            std::ifstream in(meta);
+            for (std::string line; std::getline(in, line);) {
+                if (line.rfind("seg=", 0) != 0) kept += line + "\n";
+            }
+        }
+        std::ofstream(meta, std::ios::trunc) << kept << "seg=0,1000,1001\nseg=500,4000,10\n";
+
+        server_->setBehaviour({.payload = payload});
+        HttpDownloader dl(rec.reporter());
+        DownloadRequest resumed = request(dir, "file.bin", 2);
+        resumed.existingFilePath = file.string();
+        dl.start(2, resumed);
+        QVERIFY2(rec.waitForState(2, DownloadState::Completed), rec.error(2).c_str());
+        QCOMPARE(readFile(rec.path(2)), payload);
+    }
+
     // A server that stops sending mid-transfer but keeps the connection open must not hang
     // the download forever: the stalled request is dropped and retried.
     void stalledConnectionIsRetried_data() {

@@ -276,6 +276,10 @@ void UpdateManager::handleFeedReply(QNetworkReply* reply, bool userInitiated) {
         problem = QStringLiteral("The update information has no secure download link");
     else if (!hexPattern.match(QString::fromLatin1(sha256)).hasMatch())
         problem = QStringLiteral("The update information has no valid SHA-256 checksum");
+    else if (!orbit::core::verifyUpdateSignature(offer, kLinux, releasePublicKey()))
+        // The checksum comes from the same file as the link, so only the release key's
+        // signature shows the offer is really Orbit's.
+        problem = QStringLiteral("The update information isn't signed with Orbit's release key");
 
     if (!problem.isEmpty()) {
         ORBIT_LOG_WARN("update", "Rejected update feed: " + problem.toStdString());
@@ -319,6 +323,13 @@ void UpdateManager::handleFeedReply(QNetworkReply* reply, bool userInitiated) {
         announcedVersion_ = latestVersion_;
         emit updateFound(false);
     }
+}
+
+QByteArray UpdateManager::releasePublicKey() const {
+    // A test feed (ORBIT_UPDATE_FEED) may come with its own key; the real feed never does.
+    const QByteArray testKey = qgetenv("ORBIT_UPDATE_PUBLIC_KEY");
+    if (feedOverridden_ && !testKey.isEmpty()) return QByteArray::fromBase64(testKey);
+    return QByteArray::fromBase64(QByteArrayLiteral(ORBIT_UPDATE_PUBLIC_KEY));
 }
 
 bool UpdateManager::isAllowedDownloadUrl(const QUrl& url) const {
@@ -544,14 +555,39 @@ void UpdateManager::installLinuxUpdate() {
                  QStringLiteral("Orbit is installed in a system folder; update it with your package manager"));
         return;
     }
+    // Nothing is replaced until the new orbit has started on this system (--version: it
+    // finds its libraries and glibc). Each file it replaces is backed up first and swapped
+    // in with a rename; if any step fails, the backups go back, so an interrupted or
+    // failed update leaves the old version working, never a mix of the two.
     static const char* kScript =
         "pid=$1; archive=$2; dir=$3; exe=$4\n"
         "i=0; while kill -0 \"$pid\" 2>/dev/null && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done\n"
-        "tmp=$(mktemp -d \"$dir/.orbit-update.XXXXXX\") || exit 1\n"
-        "if tar -xzf \"$archive\" -C \"$tmp\" --strip-components=1 && [ -x \"$tmp/orbit\" ]; then\n"
-        "  cp -rf \"$tmp\"/. \"$dir\"/ && rm -f \"$archive\"\n"
+        "tmp=$(mktemp -d \"$dir/.orbit-update.XXXXXX\") || exec setsid \"$exe\" >/dev/null 2>&1 </dev/null\n"
+        "bak=$(mktemp -d \"$dir/.orbit-backup.XXXXXX\") || { rm -rf \"$tmp\"; exec setsid \"$exe\" >/dev/null 2>&1 </dev/null; }\n"
+        "ok=0\n"
+        "if tar -xzf \"$archive\" -C \"$tmp\" --strip-components=1 && [ -x \"$tmp/orbit\" ] &&\n"
+        "   \"$tmp/orbit\" --version >/dev/null 2>&1 && (cd \"$tmp\" && find . -type f) > \"$bak/.files\"; then\n"
+        "  ok=1\n"
+        "  while IFS= read -r f; do\n"
+        "    [ -e \"$dir/$f\" ] || continue\n"
+        "    mkdir -p \"$bak/$(dirname \"$f\")\" && cp -p \"$dir/$f\" \"$bak/$f\" || { ok=0; break; }\n"
+        "  done < \"$bak/.files\"\n"
+        "  if [ $ok = 1 ]; then\n"
+        "    while IFS= read -r f; do\n"
+        "      mkdir -p \"$dir/$(dirname \"$f\")\" && cp -p \"$tmp/$f\" \"$dir/$f.orbit-new\" &&\n"
+        "        mv -f \"$dir/$f.orbit-new\" \"$dir/$f\" || { ok=0; break; }\n"
+        "    done < \"$bak/.files\"\n"
+        "  fi\n"
+        "  if [ $ok = 1 ]; then\n"
+        "    rm -f \"$archive\"\n"
+        "  else\n"
+        "    while IFS= read -r f; do\n"
+        "      rm -f \"$dir/$f.orbit-new\"\n"
+        "      [ -e \"$bak/$f\" ] && cp -p \"$bak/$f\" \"$dir/$f.orbit-new\" && mv -f \"$dir/$f.orbit-new\" \"$dir/$f\"\n"
+        "    done < \"$bak/.files\"\n"
+        "  fi\n"
         "fi\n"
-        "rm -rf \"$tmp\"\n"
+        "rm -rf \"$tmp\" \"$bak\"\n"
         "exec setsid \"$exe\" >/dev/null 2>&1 </dev/null\n";
     const QStringList args{QStringLiteral("-c"), QString::fromLatin1(kScript), QStringLiteral("orbit-update"),
                            QString::number(QCoreApplication::applicationPid()), installerPath(), installDir,

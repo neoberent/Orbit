@@ -9,6 +9,15 @@ if(NOT ORBIT_RELEASE_VERSION MATCHES "^[0-9]+(\\.[0-9]+)*$")
 endif()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/installer/Orbit.iss")
 
+# The public half of the release key: Orbit installs only updates whose feed entry it signed
+# (the private half stays with the maintainer and signs updates.json when the website is built).
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/installer/update-signing.pub" ORBIT_UPDATE_PUBLIC_KEY)
+string(STRIP "${ORBIT_UPDATE_PUBLIC_KEY}" ORBIT_UPDATE_PUBLIC_KEY)
+if(NOT ORBIT_UPDATE_PUBLIC_KEY MATCHES "^[A-Za-z0-9+/]+=$")
+    message(FATAL_ERROR "installer/update-signing.pub must hold the base64 Ed25519 public key")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/installer/update-signing.pub")
+
 project(Orbit
     VERSION ${ORBIT_RELEASE_VERSION}
     DESCRIPTION "Orbit Download Manager - multi-connection HTTP and BitTorrent downloads"
@@ -30,6 +39,20 @@ if(ORBIT_SANITIZE AND NOT MSVC)
     add_link_options(-fsanitize=address,undefined)
 endif()
 
+if(UNIX AND NOT APPLE)
+    # The hardening distributions give their own packages, for the release archive (built
+    # straight with CMake): checked string/memory functions, stack protection, and
+    # relocations made read-only once loaded. Fortify needs optimization, so not in Debug.
+    set(_orbit_fortify 3)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
+        set(_orbit_fortify 2)
+    endif()
+    add_compile_options(-fstack-protector-strong -fstack-clash-protection
+                        "$<$<NOT:$<CONFIG:Debug>>:-U_FORTIFY_SOURCE>"
+                        "$<$<NOT:$<CONFIG:Debug>>:-D_FORTIFY_SOURCE=${_orbit_fortify}>")
+    add_link_options(LINKER:-z,relro LINKER:-z,now LINKER:-z,noexecstack)
+endif()
+
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
@@ -38,6 +61,17 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Quick QuickControls2 Netwo
 find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(LibtorrentRasterbar CONFIG REQUIRED)
+if(UNIX)
+    # The distribution's libtorrent is a release build, but its CMake package defines
+    # TORRENT_USE_ASSERTS for a Debug consumer, and that changes struct layouts (on Arch's
+    # 2.1.2, torrent_status grows 16 bytes): a Debug or sanitizer build of Orbit then reads
+    # torrent state at the wrong offsets. (vcpkg on Windows builds a matching debug library.)
+    get_target_property(_orbit_lt_defs LibtorrentRasterbar::torrent-rasterbar INTERFACE_COMPILE_DEFINITIONS)
+    if(_orbit_lt_defs)
+        list(REMOVE_ITEM _orbit_lt_defs "$<$<CONFIG:Debug>:TORRENT_USE_ASSERTS>")
+        set_target_properties(LibtorrentRasterbar::torrent-rasterbar PROPERTIES INTERFACE_COMPILE_DEFINITIONS "${_orbit_lt_defs}")
+    endif()
+endif()
 find_package(Threads REQUIRED)
 if(UNIX AND NOT APPLE)
     # Power management, file manager hand-off and the settings portal go over D-Bus; the
@@ -81,6 +115,8 @@ add_library(orbit_core STATIC
     src/core/HttpDownloader.cpp
     src/core/InterfaceDns.cpp
     include/core/InterfaceDns.hpp
+    src/core/InterfaceRelay.cpp
+    include/core/InterfaceRelay.hpp
     src/core/MediaDownloader.cpp
     include/core/MediaDownloader.hpp
     src/core/TorrentEngine.cpp
@@ -219,6 +255,7 @@ if(MSVC)
 else()
     target_compile_options(orbit PRIVATE -Wall -Wextra)
 endif()
+target_compile_definitions(orbit PRIVATE ORBIT_UPDATE_PUBLIC_KEY="${ORBIT_UPDATE_PUBLIC_KEY}")
 
 if(WIN32)
     # The browser starts this helper for native messaging; it forwards requests to the

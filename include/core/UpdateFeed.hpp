@@ -21,6 +21,8 @@ struct UpdateOffer {
     QStringList notes;
     QString released;  // ISO date
     QString page;
+    // Base64 Ed25519 signature over updateSignedMessage(), made with Orbit's release key.
+    QString signature;
 
     // Windows only: a Linux release to tell about (null when there's none).
     QVersionNumber newsVersion;
@@ -30,5 +32,15 @@ struct UpdateOffer {
 
 [[nodiscard]] UpdateOffer readUpdateFeed(const QJsonObject& feed, bool forLinux);
 [[nodiscard]] QStringList parseReleaseNotes(const QJsonValue& value);
+
+// What the release key signs for one platform's offer: everything that decides what gets
+// installed (platform, version, download link, checksum), one per line:
+//   "orbit-update-v1\n<windows|linux>\n<version>\n<url>\n<sha256, lower-case hex>\n"
+// The website's build (vite.config.js) produces the same text.
+[[nodiscard]] QByteArray updateSignedMessage(const UpdateOffer& offer, bool forLinux);
+// Whether the offer carries a valid signature by this Ed25519 public key (32 raw bytes).
+// Without it, a changed updates.json (a hacked website or hosting account) could point
+// every Orbit at another installer, since the checksum comes from the same file.
+[[nodiscard]] bool verifyUpdateSignature(const UpdateOffer& offer, bool forLinux, const QByteArray& publicKey);
 
 }

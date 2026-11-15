@@ -1,6 +1,7 @@
 #include "core/DownloadManager.hpp"
 
 #include "core/HttpDownloader.hpp"
+#include "core/InterfaceRelay.hpp"
 #include "core/MediaDownloader.hpp"
 #include "core/TorrentEngine.hpp"
 #include "utils/FileUtils.hpp"
@@ -102,6 +103,9 @@ DownloadManager::DownloadManager(std::filesystem::path stateDir, const std::stri
     torrentSettings.defaultSavePath = defaultDownloadDir_;
     torrentSettings.networkInterface = networkInterface;
     torrentEngine_ = std::make_unique<TorrentEngine>(reporter, torrentSettings);
+
+    relay_ = std::make_unique<InterfaceRelay>();
+    applyRelay(networkInterface);  // before any restored download starts
 
     loadPersistedTasksAndResume();
 }
@@ -330,18 +334,27 @@ void DownloadManager::cancel(DownloadId id) {
     DownloadType type;
     std::optional<TaskSnapshot> directlyCancelled;
     std::vector<DownloadId> toStart;
+    bool stopSeeding = false;
     {
         std::scoped_lock lock(mutex_);
         DownloadTask* task = findTaskLocked(id);
         if (!task || busy_.contains(id)) return;
         type = task->type();
+        const auto state = task->snapshot().state;
+        // Cancelling throws away an unfinished download. A finished one has nothing to
+        // cancel, and its files must never go with it (deleting them is what "Remove with
+        // files" is for); a seeding torrent just stops seeding.
+        if (state == DownloadState::Completed) return;
+        if (state == DownloadState::Seeding) {
+            stopSeeding = type == DownloadType::Torrent;
+            if (!stopSeeding) return;
+        }
 
         // A task restored from a previous session (or still waiting in the queue) has no
         // engine-side job yet, so the engines' cancel() would silently do nothing. Cancel
         // it here instead, cleaning up any partial HTTP download the same way the engine would.
-        const bool engineHasLiveJob = engineHasJobLocked(type, id);
         const auto snap = task->snapshot();
-        if (!engineHasLiveJob && snap.state != DownloadState::Completed && snap.state != DownloadState::Cancelled) {
+        if (!stopSeeding && !engineHasJobLocked(type, id) && state != DownloadState::Cancelled) {
             // A download waiting on a file conflict never wrote anything, and the file at
             // its path belongs to someone else, so there's nothing of ours to delete.
             if (type == DownloadType::Http && !snap.destinationPath.empty() && snap.fileConflictPath.empty()) {
@@ -358,6 +371,11 @@ void DownloadManager::cancel(DownloadId id) {
     if (directlyCancelled) {
         startTasks(toStart);
         notifyUpdate(*directlyCancelled);
+        return;
+    }
+    if (stopSeeding) {
+        ORBIT_LOG_INFO("DownloadManager", "Task " + std::to_string(id) + ": stopped seeding (its files are kept)");
+        torrentEngine_->stopSeeding(id);
         return;
     }
     if (type == DownloadType::Http) httpDownloader_->cancel(id);
@@ -644,6 +662,7 @@ std::string DownloadManager::rename(DownloadId id, const std::string& newNameRaw
     namespace fs = std::filesystem;
     const std::string newName = utils::trim(newNameRaw);
     if (newName.empty()) return "Enter a name";
+    if (newName.size() > utils::kMaxFileNameBytes) return "That name is too long";
     if (utils::sanitizeFileName(newName) != newName || newName == "." || newName == "..") {
         return "A name can't contain any of these characters: \\ / : * ? \" < > |";
     }
@@ -827,9 +846,20 @@ void DownloadManager::completeFinishedPausedTorrents() {
 }
 
 void DownloadManager::setNetworkInterface(const std::string& interfaceName) {
+    applyRelay(interfaceName);
     httpDownloader_->setNetworkInterface(interfaceName);
     torrentEngine_->setNetworkInterface(interfaceName);
     mediaDownloader_->setNetworkInterface(interfaceName);
+}
+
+void DownloadManager::applyRelay(const std::string& interfaceName) {
+    // curl binds itself (HttpDownloader); yt-dlp and libtorrent's HTTP trackers go through
+    // the relay. If it can't start, they get no relay and media downloads refuse to run
+    // rather than go out unlocked.
+    relay_->setInterface(interfaceName);
+    const ProxySettings relay = relay_->proxy();
+    mediaDownloader_->setRelayProxy(relay);
+    torrentEngine_->setRelayProxy(relay);
 }
 
 int DownloadManager::subscribeUpdates(UpdateCallback callback) {

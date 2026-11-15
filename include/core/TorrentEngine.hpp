@@ -39,6 +39,8 @@ public:
     // Like forget(), but has libtorrent delete the torrent's downloaded files too.
     // Returns false when there was no live torrent for this id.
     bool forgetAndDeleteFiles(DownloadId id);
+    // Stops a finished torrent from seeding; its files stay. It then shows as Completed.
+    void stopSeeding(DownloadId id);
     [[nodiscard]] DownloadStats stats(DownloadId id) const override;
 
     [[nodiscard]] bool hasEntry(DownloadId id) const;
@@ -48,6 +50,9 @@ public:
     void setUploadRateLimit(int bytesPerSec);
     void setTorrentRateLimits(DownloadId id, std::uint64_t downloadBytesPerSec, std::uint64_t uploadBytesPerSec);
     void setProxy(const ProxySettings& proxy);
+    // The relay (DownloadManager's InterfaceRelay) that HTTP(S) trackers go through while
+    // the interface is locked and the user has no proxy of their own.
+    void setRelayProxy(const ProxySettings& relay);
     // Listens and connects only through this interface (empty = all of them).
     void setNetworkInterface(const std::string& interfaceName);
     void resolveBootstrapThrough(const std::string& interfaceName);
@@ -62,6 +67,12 @@ public:
     // anything is written, so the scattered piece writes don't fragment them badly.
     // Torrents check every piece's hash themselves, so btrfs's checksums aren't needed.
     void setNoCowOnBtrfs(bool enabled);
+    // The port peers reach this PC on (TCP and UDP). A VPN that forwards one port needs
+    // exactly that one here.
+    void setListenPort(int port);
+    // Whether non-private torrents get Orbit's list of public trackers added (more peers;
+    // off for those who'd rather announce only where the torrent says).
+    void setAddPublicTrackers(bool add);
     // Whether path is on btrfs, and the marking itself (exposed for the tests).
     static bool isOnBtrfs(const std::string& path);
     static bool markNoCow(const std::string& path);
@@ -93,6 +104,14 @@ private:
 
     void alertLoop(std::stop_token stopToken);
     [[nodiscard]] DownloadId idForHandle(const libtorrent::torrent_handle& handle) const;
+    // The user's proxy if there is one, else the relay while locked, else none.
+    void applyProxy();
+    // While locked, libtorrent would look UDP trackers' names up with the system resolver:
+    // they're swapped for their addresses looked up through the interface (the UDP
+    // tracker protocol carries no name, so nothing is lost), and web seeds (connections
+    // the relay doesn't carry) are set aside. unlockTrackers puts the originals back.
+    void lockTrackers(DownloadId id, const libtorrent::torrent_handle& handle);
+    void unlockTrackers(DownloadId id);
 
     // Requests fresh resume data for every active, metadata-having torrent and blocks
     // (bounded) until each has been written to disk or the deadline passes. Used on

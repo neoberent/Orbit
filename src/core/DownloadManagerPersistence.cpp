@@ -4,6 +4,7 @@
 #include "core/DownloadManager.hpp"
 
 #include "core/HttpDownloader.hpp"
+#include "utils/FileUtils.hpp"
 #include "utils/Hashing.hpp"
 #include "utils/Logger.hpp"
 #include "utils/StringUtils.hpp"
@@ -137,6 +138,7 @@ DownloadManager::TaskRecord DownloadManager::recordFor(const DownloadTask& task,
     add("scheduledStartAt", std::to_string(req.scheduledStartAt));
     add("fileConflict", toString(req.fileConflict));
     add("fileConflictPath", snap.fileConflictPath);
+    add("fromWebLink", req.fromWebLink ? "1" : "0");
     add("userAgent", req.userAgent);
     add("referrer", req.referrer);
     if (includeCookies) {
@@ -194,6 +196,7 @@ DownloadManager::Loaded DownloadManager::parseRecord(const TaskRecord& record) {
         else if (key == "scheduledStartAt") q.scheduledStartAt = std::strtoll(value.c_str(), nullptr, 10);
         else if (key == "fileConflict") q.fileConflict = fileConflictActionFromString(value);
         else if (key == "fileConflictPath") rec.fileConflictPath = value;
+        else if (key == "fromWebLink") q.fromWebLink = (value == "1");
         else if (key == "userAgent") q.userAgent = value;
         else if (key == "referrer") q.referrer = value;
         else if (key == "cookie") {
@@ -234,23 +237,17 @@ std::unique_ptr<DownloadTask> DownloadManager::taskFromLoaded(const Loaded& rec,
 
 void DownloadManager::persistTask(const DownloadTask& task, std::optional<DownloadState> stateOverride) const {
     const auto finalPath = stateDir_ / (std::to_string(task.id()) + kTaskFileExtension);
-    auto tempPath = finalPath;
-    tempPath += ".tmp";
-    {
-        std::ofstream out(tempPath, std::ios::trunc);
-        if (!out) return;
-        for (auto [key, value] : recordFor(task, stateOverride, true)) {
-            std::replace(value.begin(), value.end(), '\n', ' ');
-            std::replace(value.begin(), value.end(), '\r', ' ');
-            out << key << "=" << value << "\n";
-        }
-        if (!out) return;
+    std::string text;
+    for (auto [key, value] : recordFor(task, stateOverride, true)) {
+        std::replace(value.begin(), value.end(), '\n', ' ');
+        std::replace(value.begin(), value.end(), '\r', ' ');
+        text += key + "=" + value + "\n";
     }
-    // Written to a temporary file and swapped in, so a crash mid-write can't leave a
-    // truncated task file behind.
-    std::error_code ec;
-    std::filesystem::rename(tempPath, finalPath, ec);
-    if (ec) std::filesystem::remove(tempPath, ec);
+    // A crash or power cut leaves the old task file or the new one, never an empty one
+    // (which would make the download vanish from the list).
+    if (!utils::writeFileAtomically(finalPath, text)) {
+        ORBIT_LOG_WARN("DownloadManager", "Couldn't save task " + std::to_string(task.id()) + " to " + finalPath.string());
+    }
 }
 
 void DownloadManager::removePersistedTask(DownloadId id) const {

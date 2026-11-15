@@ -229,6 +229,43 @@ QString MediaDownloader::sourceAddress() const {
     return QStringLiteral("!");
 }
 
+void MediaDownloader::setRelayProxy(const ProxySettings& relay) {
+    std::scoped_lock lock(optionsMutex_);
+    relay_ = relay;
+}
+
+QProcessEnvironment MediaDownloader::processEnvironment() const {
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    std::scoped_lock lock(optionsMutex_);
+    if (networkInterface_.empty() || proxy_.enabled() || !relay_.enabled()) return env;
+    // yt-dlp sends every request, names included, to this proxy and looks nothing up
+    // itself; ffmpeg follows the same variables.
+    const QString url = QString::fromStdString(relay_.url(true));
+    for (const char* name : {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"}) {
+        env.insert(QString::fromLatin1(name), url);
+    }
+    env.remove(QStringLiteral("NO_PROXY"));
+    env.remove(QStringLiteral("no_proxy"));
+    return env;
+}
+
+QString MediaDownloader::lockProblem() const {
+    bool viaRelay = false;
+    {
+        std::scoped_lock lock(optionsMutex_);
+        if (networkInterface_.empty()) return {};
+        viaRelay = !proxy_.enabled();
+        if (viaRelay && !relay_.enabled()) {
+            return QStringLiteral("Orbit couldn't start the relay that keeps video downloads on the locked network interface");
+        }
+    }
+    // The relay fails while the interface is down too, but this says so more plainly.
+    if (sourceAddress() == QLatin1String("!")) {
+        return QStringLiteral("The network interface Orbit is bound to isn't connected (Settings > Network)");
+    }
+    return {};
+}
+
 void MediaDownloader::setCookiesFromBrowser(const QString& browser) {
     std::scoped_lock lock(optionsMutex_);
     cookiesFromBrowser_ = browser.trimmed().toLower();
@@ -265,9 +302,12 @@ QStringList MediaDownloader::commonArguments(DownloadId id, const DownloadReques
         proxy = proxy_;
         browser = cookiesFromBrowser_;
     }
-    if (proxy.enabled()) args << QStringLiteral("--proxy") << QString::fromStdString(proxy.url(true));
-    const QString source = sourceAddress();
-    if (!source.isEmpty() && source != QLatin1String("!")) args << QStringLiteral("--source-address") << source;
+    if (proxy.enabled()) {
+        args << QStringLiteral("--proxy") << QString::fromStdString(proxy.url(true));
+        // Without the relay, the address is all that ties yt-dlp to a locked interface.
+        const QString source = sourceAddress();
+        if (!source.isEmpty() && source != QLatin1String("!")) args << QStringLiteral("--source-address") << source;
+    }
     // Cookies captured from the browser session win over reading a browser's cookie store.
     bool skipBrowser = false;
     if (id != 0) {
@@ -297,9 +337,9 @@ void MediaDownloader::fetchInfo(const QString& url, const std::vector<HttpCookie
         done(info);
         return;
     }
-    if (sourceAddress() == QLatin1String("!")) {
+    if (const QString problem = lockProblem(); !problem.isEmpty()) {
         MediaInfo info;
-        info.error = QStringLiteral("The network interface Orbit is bound to isn't connected");
+        info.error = problem;
         done(info);
         return;
     }
@@ -321,6 +361,7 @@ void MediaDownloader::fetchInfo(const QString& url, const std::vector<HttpCookie
     proc->setProgram(ytDlpPath);
     proc->setArguments(args);
     proc->setWorkingDirectory(ytDlpWorkingDirectory());
+    proc->setProcessEnvironment(processEnvironment());
     auto* timeout = new QTimer(proc);
     timeout->setSingleShot(true);
     connect(timeout, &QTimer::timeout, proc, [proc] { proc->kill(); });
@@ -415,8 +456,8 @@ void MediaDownloader::launchProcess(DownloadId id) {
         return;
     }
 
-    if (sourceAddress() == QLatin1String("!")) {
-        reporter_.reportError(id, "The network interface Orbit is bound to isn't connected (Settings > Connection).");
+    if (const QString problem = lockProblem(); !problem.isEmpty()) {
+        reporter_.reportError(id, problem.toStdString());
         reporter_.reportStateChanged(id, DownloadState::Error);
         return;
     }
@@ -496,6 +537,7 @@ void MediaDownloader::launchProcess(DownloadId id) {
     proc->setProgram(ytDlpPath);
     proc->setArguments(args);
     proc->setWorkingDirectory(ytDlpWorkingDirectory());
+    proc->setProcessEnvironment(processEnvironment());
 
     QObject::connect(proc, &QProcess::readyReadStandardOutput, this, [this, id] { onReadyReadStdout(id); });
     QObject::connect(proc, &QProcess::readyReadStandardError, this, [this, id] { onReadyReadStderr(id); });

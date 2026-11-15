@@ -352,6 +352,7 @@ int main(int argc, char* argv[]) {
     QObject::connect(&downloadModel, &DownloadListModel::transferFinished, &controller,
                      [&controller](qlonglong id, const QString&, bool success, const QString&) {
                          if (success) controller.runAfterDownload(id);
+                         controller.retryIfWorthIt(id);  // also forgets the tries of one that finished
                      });
     QObject::connect(&controller, &MainWindow::afterDownloadNotice, &trayController,
                      [&trayController](const QString& title, const QString& message, bool ok) {

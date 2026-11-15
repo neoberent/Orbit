@@ -189,21 +189,29 @@ private slots:
 
     // A page on another site can't send a POST that carries its own Origin.
     void refusesCrossSitePosts_data() {
+        QTest::addColumn<QByteArray>("host");
         QTest::addColumn<QByteArray>("origin");
         QTest::addColumn<int>("status");
-        QTest::newRow("same origin") << QByteArray("http://127.0.0.1:8765") << 200;
-        QTest::newRow("quick tunnel") << QByteArray("https://calm-river-1234.trycloudflare.com") << 200;
-        QTest::newRow("no origin") << QByteArray() << 200;
-        QTest::newRow("other site") << QByteArray("https://evil.example.net") << 403;
-        QTest::newRow("opaque origin") << QByteArray("null") << 403;
+        QTest::newRow("same origin") << QByteArray("127.0.0.1") << QByteArray("http://127.0.0.1:8765") << 200;
+        QTest::newRow("own quick tunnel") << QByteArray("calm-river-1234.trycloudflare.com")
+                                          << QByteArray("https://calm-river-1234.trycloudflare.com") << 200;
+        // Anyone can open a quick tunnel; a page on someone else's is another site.
+        QTest::newRow("someone else's quick tunnel") << QByteArray("calm-river-1234.trycloudflare.com")
+                                                     << QByteArray("https://evil-page-9999.trycloudflare.com") << 403;
+        QTest::newRow("quick tunnel page to localhost") << QByteArray("127.0.0.1")
+                                                        << QByteArray("https://evil-page-9999.trycloudflare.com") << 403;
+        QTest::newRow("no origin") << QByteArray("127.0.0.1") << QByteArray() << 200;
+        QTest::newRow("other site") << QByteArray("127.0.0.1") << QByteArray("https://evil.example.net") << 403;
+        QTest::newRow("opaque origin") << QByteArray("127.0.0.1") << QByteArray("null") << 403;
     }
 
     void refusesCrossSitePosts() {
+        QFETCH(QByteArray, host);
         QFETCH(QByteArray, origin);
         QFETCH(int, status);
         const QByteArray header = origin.isEmpty() ? QByteArray() : "Origin: " + origin + "\r\n";
         const Reply login = send("POST", "/api/login", R"({"username":"admin","password":"correct horse"})", {},
-                                 "127.0.0.1", header);
+                                 host, header);
         QCOMPARE(login.status, status);
     }
 

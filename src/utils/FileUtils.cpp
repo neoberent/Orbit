@@ -1,6 +1,8 @@
 #include "utils/FileUtils.hpp"
 
 #if !defined(_WIN32)
+#include <QStandardPaths>
+#include <QString>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -17,6 +19,7 @@
 #include <vector>
 
 #if defined(_WIN32)
+#include <io.h>
 #include <shlobj.h>
 #include <windows.h>
 #else
@@ -128,6 +131,15 @@ std::string sanitizeFileName(const std::string& name) {
             result.push_back(c);
         }
     }
+    if (result.size() > kMaxFileNameBytes) {
+        // Keep a short extension; cut the rest at a character boundary, never inside one.
+        const auto dot = result.rfind('.');
+        std::string ext = dot != std::string::npos && result.size() - dot <= 16 ? result.substr(dot) : std::string();
+        std::string stem = result.substr(0, kMaxFileNameBytes - ext.size());
+        while (!stem.empty() && (static_cast<unsigned char>(stem.back()) & 0xC0) == 0x80) stem.pop_back();
+        if (!stem.empty() && static_cast<unsigned char>(stem.back()) >= 0xC0) stem.pop_back();  // a lead byte left alone
+        result = stem + ext;
+    }
     while (!result.empty() && (result.back() == ' ' || result.back() == '.')) {
         result.pop_back();
     }
@@ -142,6 +154,43 @@ std::string sanitizeFileName(const std::string& name) {
     if (numbered || stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL") result.insert(result.begin(), '_');
 #endif
     return result;
+}
+
+bool writeFileAtomically(const fs::path& path, const std::string& data) {
+    fs::path temp = path;
+    temp += ".tmp";
+    std::error_code ec;
+#if defined(_WIN32)
+    FILE* file = _wfopen(temp.c_str(), L"wb");
+#else
+    FILE* file = std::fopen(temp.c_str(), "wb");
+#endif
+    if (!file) return false;
+    bool ok = std::fwrite(data.data(), 1, data.size(), file) == data.size() && std::fflush(file) == 0;
+#if defined(_WIN32)
+    ok = ok && ::FlushFileBuffers(reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(file))));
+#else
+    ok = ok && ::fsync(::fileno(file)) == 0;
+#endif
+    ok = std::fclose(file) == 0 && ok;
+    if (!ok) {
+        fs::remove(temp, ec);
+        return false;
+    }
+    fs::rename(temp, path, ec);
+    if (ec) {
+        fs::remove(temp, ec);
+        return false;
+    }
+#if !defined(_WIN32)
+    // The rename itself lives in the folder; flush it too, or a power cut can undo it.
+    if (const int dir = ::open(path.parent_path().empty() ? "." : path.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        dir >= 0) {
+        ::fsync(dir);
+        ::close(dir);
+    }
+#endif
+    return true;
 }
 
 namespace {
@@ -199,9 +248,20 @@ fs::path appDataDir() {
     }
     return result;
 #else
-    const char* home = std::getenv("HOME");
-    fs::path base = home ? fs::path(home) / ".local/share" : fs::temp_directory_path();
-    return base / "orbit";
+    // $XDG_DATA_HOME/orbit (in a Flatpak that's the app's own persistent folder; outside
+    // the sandbox ~/.local/share isn't kept). A folder from before XDG_DATA_HOME was
+    // honoured stays in use, so nobody's downloads list moves or vanishes.
+    static const fs::path resolved = [] {
+        const char* home = std::getenv("HOME");
+        const fs::path legacy = (home ? fs::path(home) / ".local/share" : fs::temp_directory_path()) / "orbit";
+        const char* xdg = std::getenv("XDG_DATA_HOME");
+        if (!xdg || !*xdg || !fs::path(xdg).is_absolute()) return legacy;
+        const fs::path chosen = fs::path(xdg) / "orbit";
+        std::error_code ec;
+        if (chosen != legacy && !fs::exists(chosen, ec) && fs::exists(legacy, ec)) return legacy;
+        return chosen;
+    }();
+    return resolved;
 #endif
 }
 
@@ -217,6 +277,10 @@ fs::path defaultDownloadsDir() {
     }
     return result;
 #else
+    // The desktop's own Downloads folder (user-dirs.dirs), which has the user's language
+    // ("Téléchargements") or wherever they moved it.
+    const QString location = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    if (!location.isEmpty()) return fs::path(location.toStdString());
     const char* home = std::getenv("HOME");
     return home ? fs::path(home) / "Downloads" : fs::current_path();
 #endif

@@ -138,6 +138,10 @@ struct DownloadRequest {
     // Other links to the same file. Each one that reports the same size (and byte ranges)
     // serves some of the connections; one that fails hands its part back to source.
     std::vector<std::string> mirrors{};
+
+    // Added by an orbit:// link, which any web page can open without the user reviewing
+    // it. Such a file never gets the after-download actions (unpacking, the user's command).
+    bool fromWebLink{false};
 };
 
 // What the server says about a link, without downloading it.
@@ -192,6 +196,7 @@ struct TaskOptions {
     std::int64_t scheduledStartAt{0};
     bool hasBrowserSession{false};
     std::string destinationDir;
+    bool fromWebLink{false};
 };
 
 struct TaskSnapshot {

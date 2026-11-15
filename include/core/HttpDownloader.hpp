@@ -86,6 +86,9 @@ public:
 
     // Serializes a cookie into the Netscape cookies.txt line format curl and yt-dlp read.
     [[nodiscard]] static std::string netscapeCookieLine(const HttpCookie& cookie);
+    // Points a curl handle at the system's certificates when curl's built-in path isn't
+    // where this system keeps them (a bundled curl, as in the AppImage).
+    static void applyTrustStore(void* curl);
 
 private:
     struct Segment {
@@ -103,9 +106,25 @@ private:
         std::string url;
     };
 
+    // What tells one version of a file on a server from another besides its size: a
+    // strong ETag and Last-Modified. Kept in the resume data, so a file replaced by one of
+    // the same size isn't finished with the old one's parts.
+    struct FileIdentity {
+        std::string etag;
+        std::string lastModified;
+        // Last-Modified decides when both sides have it (it's the same across a CDN's
+        // servers, where ETags often aren't); otherwise the ETag; with neither, no change.
+        [[nodiscard]] bool changedFrom(const FileIdentity& before) const {
+            if (!lastModified.empty() && !before.lastModified.empty()) return lastModified != before.lastModified;
+            if (!etag.empty() && !before.etag.empty()) return etag != before.etag;
+            return false;
+        }
+    };
+
     struct Job {
         DownloadId id{0};
         DownloadRequest request;
+        FileIdentity identity;
         std::filesystem::path filePath;
         std::filesystem::path metaPath;
         std::string resolvedFileName;
@@ -178,7 +197,8 @@ private:
     // (it always gives up on shutdown).
     bool probeRemote(const DownloadRequest& request, std::uint64_t& outSize,
                      bool& outSupportsRanges, std::string& outFileName,
-                     std::string& outError, const Job* job = nullptr, std::string* outChecksum = nullptr) const;
+                     std::string& outError, const Job* job = nullptr, std::string* outChecksum = nullptr,
+                     FileIdentity* outIdentity = nullptr) const;
     // A checksum published next to the file (name.sha256 / .sha512 / .sha256sum), looked
     // for when the link looks like a release download. Empty when there's none.
     [[nodiscard]] std::string fetchPublishedChecksum(const DownloadRequest& request, const std::string& fileName) const;

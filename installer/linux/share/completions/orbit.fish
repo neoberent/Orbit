@@ -1,6 +1,6 @@
 # fish completions for orbit (Orbit Download Manager)
 
-set -l commands add list ls status pause resume cancel remove rm show feeds help
+set -l commands add list ls status pause resume cancel remove rm show feeds config remote help
 
 function __orbit_download_ids
     # "ID  STATE ..." rows from `orbit list`; offered as "id<TAB>state  name".
@@ -13,11 +13,16 @@ complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a list -d 'Sho
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a status -d 'Totals and current speeds'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a pause -d 'Pause downloads'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a resume -d 'Resume downloads'
-complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a cancel -d 'Cancel downloads'
+complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a cancel -d 'Stop unfinished downloads and delete their partial files'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a remove -d 'Remove downloads from the list'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a show -d 'Open the window'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a feeds -d 'Torrent RSS feeds'
 complete -c orbit -n '__fish_seen_subcommand_from feeds' -x -a 'add remove check'
+complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a config -d 'Show or change settings'
+complete -c orbit -n '__fish_seen_subcommand_from config; and not __fish_seen_subcommand_from list get set' -x -a 'list get set'
+complete -c orbit -n '__fish_seen_subcommand_from get set' -x -a '(orbit config list --json 2>/dev/null | string match -rg \'"name": "([^"]*)"\')'
+complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a remote -d 'Web dashboard: status, on/off, sign-in'
+complete -c orbit -n '__fish_seen_subcommand_from remote' -x -a 'status enable disable set-password'
 complete -c orbit -n '__fish_seen_subcommand_from feeds' -l filter -x -d 'Words a title must contain'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a help -d 'Show help'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -l background -d 'Start in the tray'

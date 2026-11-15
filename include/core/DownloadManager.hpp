@@ -21,6 +21,7 @@ namespace orbit::core {
 class HttpDownloader;
 class TorrentEngine;
 class MediaDownloader;
+class InterfaceRelay;
 
 class DownloadManager {
 public:
@@ -194,6 +195,11 @@ private:
     };
     std::mutex workersMutex_;
     std::list<Worker> workers_;
+
+    // Carries yt-dlp's and the HTTP trackers' connections through a locked interface.
+    // Declared before the engines, so it outlives them.
+    std::unique_ptr<InterfaceRelay> relay_;
+    void applyRelay(const std::string& interfaceName);
 
     // Declared last so C++'s reverse-declaration-order destruction tears these down
     // FIRST. Their background threads (still running while they're being stopped/

@@ -234,9 +234,15 @@ QJsonValue Aria2RpcServer::dispatch(const QString& method, QJsonArray params, QS
     if (method == QLatin1String("aria2.addUri")) {
         const QJsonArray uris = param(0).toArray();
         if (uris.isEmpty()) { *error = QStringLiteral("No URI to download"); return {}; }
-        // aria2 takes several URIs for one file (mirrors); the first one is the download.
+        // aria2 takes several URIs for one file: the first is the download, the rest mirrors.
+        QStringList links;
+        for (const QJsonValue& uri : uris) {
+            const QString link = uri.toString().trimmed();
+            if (!link.isEmpty() && links.size() < 9) links << link;
+        }
+        if (links.isEmpty()) { *error = QStringLiteral("No URI to download"); return {}; }
         QString addError;
-        const qulonglong newId = addLink_(uris.first().toString().trimmed(), option(1, "dir"), &addError);
+        const qulonglong newId = addLink_(links, option(1, "dir"), &addError);
         if (newId == 0) { *error = addError.isEmpty() ? QStringLiteral("Couldn't add it") : addError; return {}; }
         return gidOf(newId);
     }
@@ -252,7 +258,7 @@ QJsonValue Aria2RpcServer::dispatch(const QString& method, QJsonArray params, QS
         file.write(torrent);
         file.close();
         QString addError;
-        const qulonglong newId = addLink_(path, option(2, "dir"), &addError);
+        const qulonglong newId = addLink_({path}, option(2, "dir"), &addError);
         if (newId == 0) { *error = addError; return {}; }
         return gidOf(newId);
     }

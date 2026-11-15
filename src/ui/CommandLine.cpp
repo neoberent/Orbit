@@ -16,8 +16,11 @@
 #include <QThread>
 #include <QUrl>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <iterator>
+#include <termios.h>
 #include <unistd.h>
 
 namespace command_line {
@@ -46,7 +49,8 @@ const char* const kUsage =
     "  status                       Show totals and current speeds\n"
     "  pause <id>... | --all        Pause downloads\n"
     "  resume <id>... | --all       Resume paused or failed downloads\n"
-    "  cancel <id>... | --all       Cancel downloads (the partial file is kept)\n"
+    "  cancel <id>... | --all       Stop unfinished downloads and delete what they had so far\n"
+    "                               (finished files are kept; seeding torrents stop seeding)\n"
     "  remove, rm <id>...           Remove finished, paused or failed downloads from the list\n"
     "                               (files on disk are never deleted)\n"
     "  feeds                        Show your torrent feeds\n"
@@ -54,6 +58,14 @@ const char* const kUsage =
     "                               Follow a feed: new matching items download by themselves\n"
     "  feeds remove <url>           Stop following a feed\n"
     "  feeds check                  Check every feed now\n"
+    "  config [list]                Show Orbit's settings\n"
+    "  config get <name>            Show one setting\n"
+    "  config set <name> <value>    Change one, as Settings in the window would\n"
+    "                               (e.g. config set torrentListenPort 51820)\n"
+    "  remote [status]              Show the web dashboard's state (Settings > Remote)\n"
+    "  remote enable | disable      Turn the web dashboard on or off\n"
+    "  remote set-password <user>   Set its sign-in; asks for the password (or reads\n"
+    "                               one line from standard input)\n"
     "  show                         Open Orbit's window\n"
     "  help                         Show this help\n"
     "\n"
@@ -194,6 +206,41 @@ void printStatus(const QJsonObject& s) {
         printLine(QStringLiteral("Bound to network interface: ") + s.value("networkInterface").toString());
     }
     if (s.value("metered").toBool()) printLine(QStringLiteral("Paused while the connection is metered"));
+}
+
+// A password from the terminal without echoing it, or one line from a pipe.
+QString readSecret(const char* prompt) {
+    const bool tty = ::isatty(STDIN_FILENO);
+    termios saved{};
+    if (tty) {
+        std::fputs(prompt, stderr);
+        std::fflush(stderr);
+        ::tcgetattr(STDIN_FILENO, &saved);
+        termios quiet = saved;
+        quiet.c_lflag &= ~static_cast<tcflag_t>(ECHO);
+        ::tcsetattr(STDIN_FILENO, TCSANOW, &quiet);
+    }
+    char buffer[1024];
+    QString line;
+    if (std::fgets(buffer, sizeof(buffer), stdin)) line = QString::fromLocal8Bit(buffer);
+    if (tty) {
+        ::tcsetattr(STDIN_FILENO, TCSANOW, &saved);
+        std::fputc('\n', stderr);
+    }
+    while (line.endsWith(QLatin1Char('\n')) || line.endsWith(QLatin1Char('\r'))) line.chop(1);
+    std::fill(std::begin(buffer), std::end(buffer), '\0');
+    return line;
+}
+
+void printRemoteStatus(const QJsonObject& s) {
+    const bool enabled = s.value("enabled").toBool();
+    printLine(QStringLiteral("Web dashboard: ") +
+              (!enabled ? QStringLiteral("off")
+                        : s.value("running").toBool() ? QStringLiteral("on, at ") + s.value("url").toString()
+                                                      : s.value("message").toString()));
+    printLine(QStringLiteral("Sign-in: ") + (s.value("configured").toBool() ? s.value("username").toString()
+                                                                             : QStringLiteral("not set (orbit remote set-password <user>)")));
+    if (!s.value("tunnelHosts").toString().isEmpty()) printLine(QStringLiteral("Tunnel: ") + s.value("tunnelHosts").toString());
 }
 
 QString absoluteSource(const QString& arg) {
@@ -348,6 +395,65 @@ int runCommand(const QString& command, const QStringList& args) {
         }
     } else if (command == QLatin1String("show")) {
         request(QJsonObject{{"type", "show"}});
+    } else if (command == QLatin1String("config")) {
+        const QString action = positional.value(0, QStringLiteral("list"));
+        const qsizetype wanted = action == QLatin1String("set") ? 3 : action == QLatin1String("get") ? 2 : 1;
+        if (positional.size() < wanted) {
+            printError(action == QLatin1String("set") ? QStringLiteral("config set needs a name and a value")
+                                                      : QStringLiteral("config get needs a name (see orbit config list)"));
+            exitCode = kExitUsage;
+        } else if (const auto reply = request(QJsonObject{{"type", "config"}, {"action", action},
+                                                          {"name", positional.value(1)}, {"value", positional.value(2)}})) {
+            if (!reply->value("ok").toBool()) {
+                printError(reply->value("error").toString());
+                exitCode = kExitFailed;
+            } else if (action == QLatin1String("list")) {
+                const QJsonArray settings = reply->value("settings").toArray();
+                if (json) {
+                    printLine(QString::fromUtf8(QJsonDocument(settings).toJson(QJsonDocument::Indented)).trimmed());
+                } else {
+                    for (const QJsonValue& v : settings) {
+                        const QJsonObject s = v.toObject();
+                        printLine(QStringLiteral("%1 = %2").arg(s.value("name").toString(), -32).arg(s.value("value").toVariant().toString()));
+                    }
+                }
+            } else {
+                printLine(json ? QString::fromUtf8(QJsonDocument(*reply).toJson(QJsonDocument::Compact))
+                               : reply->value("value").toVariant().toString());
+            }
+        }
+    } else if (command == QLatin1String("remote")) {
+        const QString action = positional.value(0, QStringLiteral("status"));
+        QJsonObject r{{"type", "remote"}, {"action", action}};
+        bool ready = true;
+        if (action == QLatin1String("set-password")) {
+            if (positional.size() < 2) {
+                printError(QStringLiteral("remote set-password needs a username"));
+                exitCode = kExitUsage;
+                ready = false;
+            } else {
+                const QString password = readSecret("Password: ");
+                if (::isatty(STDIN_FILENO) && readSecret("Again: ") != password) {
+                    printError(QStringLiteral("the passwords don't match"));
+                    exitCode = kExitFailed;
+                    ready = false;
+                }
+                r.insert("username", positional.value(1));
+                r.insert("password", password);
+            }
+        }
+        if (ready) {
+            if (const auto reply = request(r)) {
+                if (!reply->value("ok").toBool()) {
+                    printError(reply->value("error").toString());
+                    exitCode = kExitFailed;
+                } else if (json) {
+                    printLine(QString::fromUtf8(QJsonDocument(*reply).toJson(QJsonDocument::Indented)).trimmed());
+                } else {
+                    printRemoteStatus(*reply);
+                }
+            }
+        }
     } else if (command == QLatin1String("feeds")) {
         const QString action = positional.value(0, QStringLiteral("list"));
         QJsonObject r{{"type", "feeds"}, {"action", action}, {"url", positional.value(1)}, {"filter", filter}};
@@ -401,7 +507,7 @@ std::optional<int> run(int argc, char* argv[]) {
     static const QStringList commands{
         QStringLiteral("add"), QStringLiteral("list"), QStringLiteral("status"), QStringLiteral("pause"),
         QStringLiteral("resume"), QStringLiteral("cancel"), QStringLiteral("remove"), QStringLiteral("show"),
-        QStringLiteral("feeds"),
+        QStringLiteral("feeds"), QStringLiteral("config"), QStringLiteral("remote"),
     };
     if (!commands.contains(command)) return std::nullopt;
 

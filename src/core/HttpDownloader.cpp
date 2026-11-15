@@ -201,6 +201,9 @@ struct ProbeContext {
     // "sha512:<hex>", "sha256:<hex>" or "md5:<hex>" (the strongest one offered).
     std::string checksum;
     int checksumStrength{0};
+    // Of the last response (a redirect's headers describe something else).
+    std::string etag;
+    std::string lastModified;
 };
 
 std::string base64ToHex(std::string_view text) {
@@ -320,7 +323,15 @@ size_t probeHeaderCallback(char* buffer, size_t size, size_t nitems, void* userd
         if (utils::startsWith(lower, "http/")) {
             ctx->checksum.clear();
             ctx->checksumStrength = 0;
+            ctx->etag.clear();
+            ctx->lastModified.clear();
         }
+        if (utils::startsWith(lower, "etag:")) {
+            const std::string value = utils::trim(line.substr(5));
+            // A weak ETag (W/"...") may stay the same while the bytes change.
+            if (!utils::startsWith(value, "W/") && !utils::startsWith(value, "w/")) ctx->etag = value;
+        }
+        if (utils::startsWith(lower, "last-modified:")) ctx->lastModified = utils::trim(line.substr(14));
         // Content-Digest is left out on purpose: it covers just this response's bytes,
         // which for a range answer is only part of the file.
         for (const char* header : {"repr-digest:", "digest:", "x-goog-hash:"}) {
@@ -349,7 +360,43 @@ std::string netscapeLine(const HttpCookie& cookie) {
            cookie.value;
 }
 
+}
+
+void HttpDownloader::applyTrustStore(void* handle) {
+#if defined(__linux__)
+    // curl looks for the system's certificates where the system that built it keeps them.
+    // A curl bundled in an AppImage built on Ubuntu would look in Debian's place on Fedora
+    // or openSUSE and refuse every https download, so where its own path doesn't exist,
+    // the first standard one that does is used.
+    static const std::string path = [] {
+        std::string chosen;
+        CURL* probe = curl_easy_init();
+        char* builtIn = nullptr;
+        if (probe) curl_easy_getinfo(probe, CURLINFO_CAINFO, &builtIn);
+        std::error_code ec;
+        if (!builtIn || !std::filesystem::exists(builtIn, ec)) {
+            for (const char* candidate : {"/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
+                                          "/etc/ssl/ca-bundle.pem", "/etc/pki/tls/cacert.pem", "/etc/ssl/cert.pem",
+                                          "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"}) {
+                if (std::filesystem::exists(candidate, ec)) {
+                    chosen = candidate;
+                    break;
+                }
+            }
+        }
+        if (probe) curl_easy_cleanup(probe);
+        return chosen;
+    }();
+    if (!path.empty()) curl_easy_setopt(static_cast<CURL*>(handle), CURLOPT_CAINFO, path.c_str());
+#else
+    (void)handle;
+#endif
+}
+
+namespace {
+
 void applyCommonSslOptions(CURL* curl) {
+    HttpDownloader::applyTrustStore(curl);
     curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
     // Requests are only ever meant to hit remote HTTP(S) servers. Without this, a
     // caller that fails to validate its input (e.g. a URL arriving via the orbit://
@@ -907,26 +954,15 @@ bool HttpDownloader::rewriteResumeSource(const std::filesystem::path& metaPath, 
     in.close();
     if (!replaced) lines.insert(lines.begin(), "source=" + newSource);
 
-    auto tempPath = metaPath;
-    tempPath += ".tmp";
-    {
-        std::ofstream out(tempPath, std::ios::trunc);
-        if (!out) return false;
-        for (const std::string& l : lines) out << l << "\n";
-        if (!out) return false;
-    }
-    std::error_code ec;
-    std::filesystem::rename(tempPath, metaPath, ec);
-    if (ec) {
-        std::filesystem::remove(tempPath, ec);
-        return false;
-    }
-    return true;
+    std::string text;
+    for (const std::string& l : lines) text += l + "\n";
+    return utils::writeFileAtomically(metaPath, text);
 }
 
 bool HttpDownloader::probeRemote(const DownloadRequest& request, std::uint64_t& outSize,
                                  bool& outSupportsRanges, std::string& outFileName,
-                                 std::string& outError, const Job* job, std::string* outChecksum) const {
+                                 std::string& outError, const Job* job, std::string* outChecksum,
+                                 FileIdentity* outIdentity) const {
     const std::string& url = request.source;
     CURL* curl = curl_easy_init();
     if (!curl) {
@@ -993,6 +1029,7 @@ bool HttpDownloader::probeRemote(const DownloadRequest& request, std::uint64_t& 
         outError = (res != CURLE_OK) ? curl_easy_strerror(res) : ("HTTP " + std::to_string(httpCode));
     }
     if (ok && outChecksum) *outChecksum = ctx.checksum;
+    if (ok && outIdentity) *outIdentity = FileIdentity{ctx.etag, ctx.lastModified};
 
     curl_easy_cleanup(curl);
     return ok;
@@ -1018,10 +1055,12 @@ void HttpDownloader::runSupervisor(DownloadId id) {
         bool supportsRanges = false;
         std::string fileName;
         std::string probeError;
-        if (probeRemote(job.request, remoteSize, supportsRanges, fileName, probeError, &job) && remoteSize > 0 &&
-            remoteSize != job.totalBytes) {
-            ORBIT_LOG_WARN("HttpDownloader", "Size on the server changed (" + std::to_string(job.totalBytes) + " -> " +
+        FileIdentity remoteIdentity;
+        if (probeRemote(job.request, remoteSize, supportsRanges, fileName, probeError, &job, nullptr, &remoteIdentity) &&
+            remoteSize > 0 && (remoteSize != job.totalBytes || remoteIdentity.changedFrom(job.identity))) {
+            ORBIT_LOG_WARN("HttpDownloader", "The file on the server changed (size " + std::to_string(job.totalBytes) + " -> " +
                                                  std::to_string(remoteSize) + "); restarting " + job.filePath.string());
+            job.identity = {};
             job.segments.clear();
             std::error_code ec;
             std::filesystem::remove(job.metaPath, ec);
@@ -1037,7 +1076,9 @@ void HttpDownloader::runSupervisor(DownloadId id) {
         std::string fileName;
         std::string probeError;
         std::string serverChecksum;
-        const bool probeOk = probeRemote(job.request, remoteSize, supportsRanges, fileName, probeError, &job, &serverChecksum);
+        FileIdentity remoteIdentity;
+        const bool probeOk =
+            probeRemote(job.request, remoteSize, supportsRanges, fileName, probeError, &job, &serverChecksum, &remoteIdentity);
         if (probeOk && job.request.expectedChecksum.empty()) {
             if (serverChecksum.empty()) serverChecksum = fetchPublishedChecksum(job.request, fileName);
             if (!serverChecksum.empty()) reporter_.reportChecksumFound(id, serverChecksum);
@@ -1109,13 +1150,20 @@ void HttpDownloader::runSupervisor(DownloadId id) {
         // The saved segments only fit the file they were downloaded from. If the server now
         // reports a different size (the file was replaced, or a refreshed link points at
         // something else), splicing the two would produce a corrupt file, so start over.
-        if (restoredFromMetadata && probeOk && remoteSize > 0 && remoteSize != job.totalBytes) {
-            ORBIT_LOG_WARN("HttpDownloader", "Size on the server changed (" + std::to_string(job.totalBytes) + " -> " +
+        // The same goes for a file replaced by another of the same size (a new build of a
+        // nightly, say), which its ETag or Last-Modified gives away.
+        if (restoredFromMetadata && probeOk && remoteSize > 0 &&
+            (remoteSize != job.totalBytes || remoteIdentity.changedFrom(job.identity))) {
+            ORBIT_LOG_WARN("HttpDownloader", "The file on the server changed (size " + std::to_string(job.totalBytes) + " -> " +
                                                  std::to_string(remoteSize) + "); restarting " + job.filePath.string());
             job.segments.clear();
             std::error_code metaEc;
             std::filesystem::remove(job.metaPath, metaEc);
             restoredFromMetadata = false;
+        }
+        // Resume data from before identities were kept adopts the server's now.
+        if (!restoredFromMetadata || (job.identity.etag.empty() && job.identity.lastModified.empty())) {
+            job.identity = remoteIdentity;
         }
 
         if (!restoredFromMetadata) {
@@ -1552,7 +1600,15 @@ void HttpDownloader::downloadSegment(Job& job, Segment& segment, int ) {
         if (res == CURLE_OK) segment.success = true;
     }
 
-    std::fclose(fp);
+    // Closing writes out what stdio still buffers; if the disk is full by then, the file
+    // is missing its last bytes, and this part must not count as done.
+    if (std::fclose(fp) != 0 && !sawRealError) {
+        const int closeErr = errno;
+        segment.success = false;
+        job.segmentError = true;
+        std::scoped_lock lock(job.statsMutex);
+        job.lastErrorMessage = "Couldn't finish writing " + job.filePath.filename().string() + ": " + std::strerror(closeErr);
+    }
 
     if (sawRealError) {
         job.segmentError = true;
@@ -1685,6 +1741,12 @@ void HttpDownloader::saveResumeMetadata(Job& job, bool whileRunning) const {
     constexpr std::uint64_t kUnflushedMargin = 512 * 1024;
     std::string text = "source=" + job.request.source + "\n" + "totalBytes=" + std::to_string(job.totalBytes) + "\n" +
                        "supportsRanges=" + (job.supportsRanges ? "1" : "0") + "\n";
+    auto oneLine = [](std::string text) {
+        text.erase(std::remove_if(text.begin(), text.end(), [](char c) { return c == '\r' || c == '\n'; }), text.end());
+        return text;
+    };
+    if (!job.identity.etag.empty()) text += "etag=" + oneLine(job.identity.etag) + "\n";
+    if (!job.identity.lastModified.empty()) text += "lastModified=" + oneLine(job.identity.lastModified) + "\n";
     for (const auto& seg : job.segments) {
         std::uint64_t done = seg->bytesDownloaded.load();
         if (whileRunning && !seg->finished.load()) done = done > kUnflushedMargin ? done - kUnflushedMargin : 0;
@@ -1701,20 +1763,8 @@ void HttpDownloader::saveResumeMetadata(Job& job, bool whileRunning) const {
         }
     }
 #endif
-    // Written beside and then renamed over the old one, so a crash mid-write never
-    // leaves a half-written file that would lose the download's progress.
-    std::filesystem::path temp = job.metaPath;
-    temp += ".tmp";
-    {
-        std::ofstream out(temp, std::ios::trunc | std::ios::binary);
-        if (!out) return;
-        out << text;
-        out.flush();
-        if (!out) return;
-    }
-    std::error_code ec;
-    std::filesystem::rename(temp, job.metaPath, ec);
-    if (ec) std::filesystem::remove(temp, ec);
+    // A crash mid-write never leaves a half-written file that would lose the progress.
+    utils::writeFileAtomically(job.metaPath, text);
 }
 
 bool HttpDownloader::loadResumeMetadata(Job& job) const {
@@ -1725,6 +1775,7 @@ bool HttpDownloader::loadResumeMetadata(Job& job) const {
     std::string source;
     std::uint64_t totalBytes = 0;
     bool supportsRanges = false;
+    FileIdentity identity;
     std::vector<std::unique_ptr<Segment>> segments;
 
     while (std::getline(in, line)) {
@@ -1739,6 +1790,10 @@ bool HttpDownloader::loadResumeMetadata(Job& job) const {
             totalBytes = std::strtoull(value.c_str(), nullptr, 10);
         } else if (key == "supportsRanges") {
             supportsRanges = (value == "1");
+        } else if (key == "etag") {
+            identity.etag = value;
+        } else if (key == "lastModified") {
+            identity.lastModified = value;
         } else if (key == "seg") {
             auto parts = utils::split(value, ',');
             if (parts.size() != 3) continue;
@@ -1754,8 +1809,32 @@ bool HttpDownloader::loadResumeMetadata(Job& job) const {
     // false makes the caller probe the server again and start the file over.
     if (source != job.request.source || segments.empty() || totalBytes == 0) return false;
 
+    // The parts must cover the file exactly, each byte once, with no more done than fits;
+    // and the file must still be the size it was made. Anything else (a damaged or
+    // hand-edited file, one cut short) would fail every retry with "closed early", or
+    // finish with holes - so the download starts over instead.
+    std::vector<const Segment*> ordered;
+    for (const auto& seg : segments) ordered.push_back(seg.get());
+    std::sort(ordered.begin(), ordered.end(), [](const Segment* a, const Segment* b) { return a->startOffset < b->startOffset; });
+    std::uint64_t expectedStart = 0;
+    for (const Segment* seg : ordered) {
+        const std::uint64_t end = seg->endOffset.load();
+        if (seg->startOffset != expectedStart || end < seg->startOffset || end >= totalBytes ||
+            seg->bytesDownloaded.load() > end - seg->startOffset + 1) {
+            ORBIT_LOG_WARN("HttpDownloader", "Ignoring damaged resume data: " + job.metaPath.string());
+            return false;
+        }
+        expectedStart = end + 1;
+    }
+    std::error_code sizeEc;
+    if (expectedStart != totalBytes || std::filesystem::file_size(job.filePath, sizeEc) != totalBytes || sizeEc) {
+        ORBIT_LOG_WARN("HttpDownloader", "Resume data doesn't match the file; starting over: " + job.filePath.string());
+        return false;
+    }
+
     job.totalBytes = totalBytes;
     job.supportsRanges = supportsRanges;
+    job.identity = identity;
     job.segments = std::move(segments);
     return true;
 }

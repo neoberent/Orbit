@@ -100,6 +100,38 @@ private slots:
         QCOMPARE(readFile(downloadPath("good.bin")), payload);
     }
 
+    // `orbit cancel --all`, the aria2 interface and the web dashboard can all cancel a
+    // download that already finished; that must never cost the user the file.
+    void cancellingAFinishedDownloadKeepsItsFile() {
+        const QByteArray payload = randomPayload(256 * 1024);
+        server_->setBehaviour({.payload = payload});
+        auto m = makeManager();
+        const DownloadId id = m->addHttpDownload(request("done.bin"));
+        QVERIFY(waitUntil([&] { return stateOf(*m, id) == DownloadState::Completed; }));
+        m->cancel(id);
+        std::this_thread::sleep_for(300ms);
+        QCOMPARE(stateOf(*m, id), DownloadState::Completed);
+        QCOMPARE(readFile(downloadPath("done.bin")), payload);
+    }
+
+    // A download a web page started (orbit:// link) must still be known as one after a
+    // restart, or it would get the after-download actions when it finishes later.
+    void webLinkMarkSurvivesARestart() {
+        DownloadRequest r = request("later.bin");
+        r.fromWebLink = true;
+        r.scheduledStartAt = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::system_clock::now().time_since_epoch()).count() + 3600;
+        DownloadId id = 0;
+        {
+            auto m = makeManager();
+            id = m->addHttpDownload(r);
+            QVERIFY(m->snapshot(id)->options.fromWebLink);
+        }
+        auto again = makeManager();
+        QVERIFY(again->snapshot(id).has_value());
+        QVERIFY(again->snapshot(id)->options.fromWebLink);
+    }
+
     void flagsAChecksumMismatch() {
         server_->setBehaviour({.payload = randomPayload(64 * 1024)});
         auto m = makeManager();

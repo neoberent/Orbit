@@ -21,7 +21,15 @@ std::filesystem::path uniquePath(const std::filesystem::path& desired);
 
 std::optional<std::uint64_t> fileSize(const std::filesystem::path& path);
 
+// Replaces characters no file name may hold and keeps it within kMaxFileNameBytes (cut at a
+// UTF-8 character, extension kept), so a long name from a server or URL can always be
+// created, with room left for " (12)" and the ".orbitresume" beside it.
+inline constexpr std::size_t kMaxFileNameBytes = 200;
 std::string sanitizeFileName(const std::string& name);
+// Replaces path with data so that after a crash or power cut it holds either the old
+// contents or the new ones, never a truncated mix: written beside it, flushed to disk,
+// renamed over it, and the folder flushed too. False if any step failed (path untouched).
+bool writeFileAtomically(const std::filesystem::path& path, const std::string& data);
 
 std::filesystem::path appDataDir();
 

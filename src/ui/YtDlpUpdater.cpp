@@ -250,6 +250,9 @@ void YtDlpUpdater::check(bool userInitiated) {
         state_ == QLatin1String("downloading") || state_ == QLatin1String("installing")) {
         return;
     }
+    // Checked here rather than at each caller, so no automatic path (a failed media
+    // download, turning auto-update on) can reach GitHub past the interface lock.
+    if (!userInitiated && lockedToInterface()) return;
     userInitiated_ = userInitiated;
     ORBIT_LOG_INFO("yt-dlp", std::string(userInitiated ? "Manual" : "Automatic") + " update check");
     setState(QStringLiteral("checking"));

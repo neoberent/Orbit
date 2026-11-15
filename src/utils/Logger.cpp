@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
@@ -51,6 +52,9 @@ Logger& Logger::instance() {
 void Logger::setLogFile(const std::string& path) {
     std::scoped_lock lock(g_ioMutex);
     logFilePath_ = path;
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    logFileBytes_ = ec ? 0 : static_cast<unsigned long long>(size);
 }
 
 void Logger::log(LogLevel level, std::string_view tag, std::string_view message) {
@@ -69,9 +73,16 @@ void Logger::log(LogLevel level, std::string_view tag, std::string_view message)
         std::fflush(stdout);
     }
     if (!logFilePath_.empty()) {
+        if (logFileBytes_ > kMaxLogBytes) {
+            // One older log is kept beside it; the one before that goes.
+            std::error_code ec;
+            std::filesystem::rename(logFilePath_, logFilePath_ + ".1", ec);
+            logFileBytes_ = 0;
+        }
         std::ofstream file(logFilePath_, std::ios::app);
         if (file) {
             file << line.str() << '\n';
+            logFileBytes_ += line.str().size() + 1;
         }
     }
 }

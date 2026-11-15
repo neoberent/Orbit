@@ -3,6 +3,9 @@
 #include "utils/Logger.hpp"
 #if defined(__linux__)
 #include "DesktopNotifications.hpp"
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QVariantMap>
 #endif
 
 #include <QAction>
@@ -207,9 +210,23 @@ void TrayController::notifyMetered(int count) {
 }
 
 void TrayController::setProgress(double progress, const QColor& color) {
-    if (!trayIcon_) return;
     // 2% steps: smooth enough to watch, without redrawing the icon every second.
     const int step = progress < 0 ? -1 : static_cast<int>(std::clamp(progress, 0.0, 1.0) * 50.0 + 0.5);
+#if defined(__linux__)
+    if (step != launcherStep_) {
+        // The same progress on Orbit's taskbar or dock entry (KDE's task manager, Dash to
+        // Dock, Plank and others listen for this signal).
+        launcherStep_ = step;
+        QDBusMessage update = QDBusMessage::createSignal(QStringLiteral("/com/canonical/unity/launcherentry/orbit"),
+                                                         QStringLiteral("com.canonical.Unity.LauncherEntry"),
+                                                         QStringLiteral("Update"));
+        update << QStringLiteral("application://%1.desktop").arg(QGuiApplication::desktopFileName())
+               << QVariantMap{{QStringLiteral("progress"), step < 0 ? 0.0 : step / 50.0},
+                              {QStringLiteral("progress-visible"), step >= 0}};
+        QDBusConnection::sessionBus().send(update);
+    }
+#endif
+    if (!trayIcon_) return;
     if (step == shownProgressStep_ && color == shownProgressColor_) return;
     shownProgressStep_ = step;
     shownProgressColor_ = color;

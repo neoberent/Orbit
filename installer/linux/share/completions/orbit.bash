@@ -7,7 +7,7 @@ _orbit() {
     cmd=${COMP_WORDS[1]}
 
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=($(compgen -W "add list ls status pause resume cancel remove rm show feeds help --background --headless --version" -- "$cur"))
+        COMPREPLY=($(compgen -W "add list ls status pause resume cancel remove rm show feeds config remote help --background --headless --version" -- "$cur"))
         return
     fi
     case $cmd in
@@ -30,6 +30,17 @@ _orbit() {
             ;;
         feeds)
             COMPREPLY=($(compgen -W "add remove check --filter --dir --json" -- "$cur"))
+            ;;
+        config)
+            if [ "$COMP_CWORD" -eq 2 ]; then
+                COMPREPLY=($(compgen -W "list get set --json" -- "$cur"))
+            elif [ "$COMP_CWORD" -eq 3 ]; then
+                names=$(orbit config list --json 2>/dev/null | sed -n 's/.*"name": "\([^"]*\)".*/\1/p')
+                COMPREPLY=($(compgen -W "$names" -- "$cur"))
+            fi
+            ;;
+        remote)
+            COMPREPLY=($(compgen -W "status enable disable set-password --json" -- "$cur"))
             ;;
         list|ls|status)
             COMPREPLY=($(compgen -W "--json" -- "$cur"))

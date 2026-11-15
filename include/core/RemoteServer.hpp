@@ -56,8 +56,10 @@ public:
     // The bare, lower-case host name in a Host header, URL or plain name ("" if none).
     [[nodiscard]] static QString normalizeHost(const QString& hostOrUrl);
     [[nodiscard]] bool isAllowedHost(const QString& hostHeader) const;
-    // A POST's Origin header must name one of the hosts above (or be absent).
-    [[nodiscard]] bool isAllowedOrigin(const QString& originHeader) const;
+    // A POST's Origin header must be absent, or name the very host the request was sent to,
+    // loopback, or one of the named hosts above. (Any quick tunnel is a valid Host, but a
+    // page on somebody else's quick tunnel is a different site.)
+    [[nodiscard]] bool isAllowedOrigin(const QString& originHeader, const QString& hostHeader) const;
 
 signals:
     void errorOccurred(const QString& message);

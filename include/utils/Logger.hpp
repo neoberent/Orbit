@@ -24,6 +24,12 @@ private:
     Logger() = default;
     std::atomic<LogLevel> minLevel_{LogLevel::Info};
     std::string logFilePath_{};  // guarded by g_ioMutex in Logger.cpp
+    // Bytes in the log file; past kMaxLogBytes it becomes <log>.1 and a new one starts,
+    // so a long-running (headless) Orbit can't fill the disk with its log.
+    unsigned long long logFileBytes_{0};
+
+public:
+    static constexpr unsigned long long kMaxLogBytes = 5ull * 1024 * 1024;
 };
 
 std::string formatCurrentTimestamp();

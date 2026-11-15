@@ -100,6 +100,8 @@ private:
     void installLinuxUpdate();
 #endif
     [[nodiscard]] bool isAllowedDownloadUrl(const QUrl& url) const;
+    // The Ed25519 key update offers must be signed with (32 raw bytes).
+    [[nodiscard]] QByteArray releasePublicKey() const;
 
     QNetworkAccessManager* network_{nullptr};
     QPointer<QNetworkReply> feedReply_;

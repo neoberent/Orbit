@@ -72,6 +72,35 @@ ColumnLayout {
                 onMoved: appController.maxConcurrentDownloads = value
             }
         }
+
+        SettingsRow {
+            label: "Try failed downloads again"
+            description: appController.autoRetryCount > 0
+                         ? "After a dropped connection, a timeout or a busy server; waits a little longer each time"
+                         : "Failed downloads wait for you to retry them"
+            FormField {
+                visible: appController.autoRetryCount > 0
+                Layout.preferredWidth: 90
+                suffix: "times"
+                text: appController.autoRetryCount
+                validator: IntValidator { bottom: 1; top: 20 }
+                accessibleLabel: "Number of tries"
+                onEditingFinished: if (field.acceptableInput) appController.autoRetryCount = parseInt(text)
+            }
+            FormField {
+                visible: appController.autoRetryCount > 0
+                Layout.preferredWidth: 90
+                suffix: "s"
+                text: appController.autoRetryDelaySeconds
+                validator: IntValidator { bottom: 5; top: 3600 }
+                accessibleLabel: "Seconds before the first try"
+                onEditingFinished: if (field.acceptableInput) appController.autoRetryDelaySeconds = parseInt(text)
+            }
+            ToggleSwitch {
+                checked: appController.autoRetryCount > 0
+                onToggled: appController.autoRetryCount = checked ? 3 : 0
+            }
+        }
     }
 
     SettingsGroup {

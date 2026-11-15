@@ -35,9 +35,13 @@
 #include <libtorrent/write_resume_data.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <chrono>
 #include <fstream>
 #include <iterator>
+#include <list>
+#include <set>
 #include <system_error>
 #include <vector>
 
@@ -150,15 +154,32 @@ struct TorrentEngine::Impl {
         bool sequential{false};
         bool nameReported{false};
         bool seedingStopped{false};
+        // Set while the interface lock has swapped this torrent's trackers (see lockTrackers).
+        bool trackersLocked{false};
+        std::vector<lt::announce_entry> originalTrackers{};
+        std::vector<std::string> originalUrlSeeds{};
     };
+
+    ProxySettings userProxy;
+    ProxySettings relayProxy;
 
     double seedRatioLimit{0};
     int seedMinutesLimit{0};
     bool seedAfterDownload{false};
     bool noCowOnBtrfs{true};
+    bool addPublicTrackers{true};
 
     mutable std::mutex mutex;
     std::unordered_map<DownloadId, Entry> entries;
+
+    // Background lookups of locked torrents' UDP trackers. Declared after the entries
+    // they update (and the session), so they're stopped and joined before those go.
+    struct Lookup {
+        std::jthread thread;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
+    std::mutex lookupsMutex;
+    std::list<Lookup> lookups;
 
     // Looks up the DHT's bootstrap routers through the locked interface. Declared last, so
     // it's stopped and joined before the session it configures goes away.
@@ -209,8 +230,10 @@ TorrentEngine::TorrentEngine(ProgressReporter reporter, TorrentEngineSettings se
     pack.set_int(lt::settings_pack::peer_connect_timeout, 8);
     pack.set_int(lt::settings_pack::min_reconnect_time, 15);
     pack.set_bool(lt::settings_pack::enable_lsd, true);
-    pack.set_bool(lt::settings_pack::enable_upnp, true);
-    pack.set_bool(lt::settings_pack::enable_natpmp, true);
+    // Port mapping asks the router of the normal connection, which is no use (and a
+    // giveaway) while torrents are locked to a VPN's interface.
+    pack.set_bool(lt::settings_pack::enable_upnp, settings.networkInterface.empty());
+    pack.set_bool(lt::settings_pack::enable_natpmp, settings.networkInterface.empty());
 
     pack.set_bool(lt::settings_pack::announce_to_all_trackers, true);
     pack.set_bool(lt::settings_pack::announce_to_all_tiers, true);
@@ -268,8 +291,7 @@ TorrentEngine::~TorrentEngine() {
         const lt::session_params sp = impl_->session->session_state(lt::session_handle::save_dht_state);
         const std::vector<char> buf = lt::write_session_params_buf(sp, lt::session_handle::save_dht_state);
         utils::ensureDirectoryExists(utils::appDataDir());
-        std::ofstream out{dhtStateFilePath(), std::ios::binary | std::ios::trunc};
-        if (out) out.write(buf.data(), static_cast<std::streamsize>(buf.size()));
+        utils::writeFileAtomically(dhtStateFilePath(), std::string(buf.begin(), buf.end()));
     } catch (const std::exception& e) {
         ORBIT_LOG_WARN("TorrentEngine", std::string("Failed to save DHT state: ") + e.what());
     }
@@ -291,9 +313,31 @@ void TorrentEngine::writeResumeData(const lt::torrent_handle& handle, const lt::
     std::error_code fsec;
     std::filesystem::create_directories(resumeDataDir(), fsec);
 
-    const std::vector<char> buf = lt::write_resume_data_buf(params);
-    std::ofstream out(resumeDataFilePath(id), std::ios::binary | std::ios::trunc);
-    if (out) out.write(buf.data(), static_cast<std::streamsize>(buf.size()));
+    // While the lock has swapped this torrent's trackers for addresses, the resume data
+    // keeps the real ones, so they come back as they were (and are looked up afresh).
+    bool locked = false;
+    lt::add_torrent_params patched;
+    {
+        std::scoped_lock lock(impl_->mutex);
+        const auto it = impl_->entries.find(id);
+        if (it != impl_->entries.end() && it->second.trackersLocked) {
+            locked = true;
+            patched = params;
+            patched.trackers.clear();
+            patched.tracker_tiers.clear();
+            for (const lt::announce_entry& tracker : it->second.originalTrackers) {
+                patched.trackers.push_back(tracker.url);
+                patched.tracker_tiers.push_back(tracker.tier);
+            }
+            patched.url_seeds = it->second.originalUrlSeeds;
+        }
+    }
+    const std::vector<char> buf = lt::write_resume_data_buf(locked ? patched : params);
+    // Written in place, a crash mid-write left a file libtorrent can't read, and the
+    // torrent restarted from its source (gone, for an uploaded .torrent) or rechecked.
+    if (!utils::writeFileAtomically(resumeDataFilePath(id), std::string(buf.begin(), buf.end()))) {
+        ORBIT_LOG_WARN("TorrentEngine", "Couldn't save resume data for download " + std::to_string(id));
+    }
 }
 
 void TorrentEngine::saveAllResumeDataBlocking() {
@@ -404,7 +448,12 @@ void TorrentEngine::start(DownloadId id, const DownloadRequest& request) {
             }
         }
 
-        if (atp.ti && !atp.ti->priv()) {
+        bool addPublic = true;
+        {
+            std::scoped_lock lock(impl_->mutex);
+            addPublic = impl_->addPublicTrackers;
+        }
+        if (addPublic && atp.ti && !atp.ti->priv()) {
             for (const std::string& tracker : supplementalPublicTrackers()) {
                 if (std::find(atp.trackers.begin(), atp.trackers.end(), tracker) == atp.trackers.end()) {
                     atp.trackers.push_back(tracker);
@@ -459,6 +508,15 @@ void TorrentEngine::start(DownloadId id, const DownloadRequest& request) {
     }
     if (noCow && atp.ti) prepareNoCow(*atp.ti, atp.save_path);
 
+    // While locked, the torrent is added paused, so it can't announce to a tracker by name
+    // before lockTrackers has swapped them; then it gets its own flags back.
+    const bool locked = !impl_->settings.networkInterface.empty();
+    const lt::torrent_flags_t startFlags = atp.flags;
+    if (locked) {
+        atp.flags |= lt::torrent_flags::paused;
+        atp.flags &= ~lt::torrent_flags::auto_managed;
+    }
+
     lt::error_code ec;
     lt::torrent_handle handle = impl_->session->add_torrent(std::move(atp), ec);
     if (ec || !handle.is_valid()) {
@@ -466,17 +524,21 @@ void TorrentEngine::start(DownloadId id, const DownloadRequest& request) {
         reporter_.reportStateChanged(id, DownloadState::Error);
         return;
     }
+    {
+        std::scoped_lock lock(impl_->mutex);
+        impl_->entries[id] = Impl::Entry{.handle = handle, .request = request, .lastState = DownloadState::Connecting,
+                                         .sequential = request.sequential};
+    }
+    if (locked) {
+        lockTrackers(id, handle);
+        handle.set_flags(startFlags, lt::torrent_flags::paused | lt::torrent_flags::auto_managed);
+    }
 
     handle.force_dht_announce();
     handle.force_reannounce();
     if (request.speedLimitBytesPerSec > 0) handle.set_download_limit(toLimit(request.speedLimitBytesPerSec));
     if (request.uploadLimitBytesPerSec > 0) handle.set_upload_limit(toLimit(request.uploadLimitBytesPerSec));
     if (request.sequential) handle.set_flags(lt::torrent_flags::sequential_download);
-
-    {
-        std::scoped_lock lock(impl_->mutex);
-        impl_->entries[id] = Impl::Entry{handle, request, DownloadState::Connecting, request.sequential, false, false};
-    }
     reporter_.reportStateChanged(id, DownloadState::Connecting);
 }
 
@@ -497,6 +559,15 @@ void TorrentEngine::resume(DownloadId id) {
     it->second.seedingStopped = false;
     it->second.handle.set_flags(lt::torrent_flags::auto_managed);
     it->second.handle.resume();
+}
+
+void TorrentEngine::stopSeeding(DownloadId id) {
+    std::scoped_lock lock(impl_->mutex);
+    auto it = impl_->entries.find(id);
+    if (it == impl_->entries.end() || !it->second.handle.is_valid()) return;
+    it->second.seedingStopped = true;
+    it->second.handle.unset_flags(lt::torrent_flags::auto_managed);
+    it->second.handle.pause();
 }
 
 void TorrentEngine::cancel(DownloadId id) {
@@ -601,8 +672,38 @@ void TorrentEngine::setTorrentRateLimits(DownloadId id, std::uint64_t downloadBy
 }
 
 void TorrentEngine::setProxy(const ProxySettings& proxy) {
+    {
+        std::scoped_lock lock(impl_->mutex);
+        impl_->userProxy = proxy;
+    }
+    applyProxy();
+}
+
+void TorrentEngine::setRelayProxy(const ProxySettings& relay) {
+    {
+        std::scoped_lock lock(impl_->mutex);
+        impl_->relayProxy = relay;
+    }
+    applyProxy();
+}
+
+void TorrentEngine::applyProxy() {
+    ProxySettings user;
+    ProxySettings relay;
+    bool locked = false;
+    {
+        std::scoped_lock lock(impl_->mutex);
+        user = impl_->userProxy;
+        relay = impl_->relayProxy;
+        locked = !impl_->settings.networkInterface.empty();
+    }
+    // The user's own proxy carries everything. The relay only carries the HTTP(S)
+    // trackers (their names then never reach the system resolver): peers and the DHT are
+    // bound to the interface by libtorrent itself, and UDP trackers go by address.
+    const bool useRelay = !user.enabled() && locked && relay.enabled();
+    const ProxySettings& proxy = user.enabled() ? user : relay;
     lt::settings_pack pack;
-    if (!proxy.enabled()) {
+    if (!user.enabled() && !useRelay) {
         pack.set_int(lt::settings_pack::proxy_type, lt::settings_pack::none);
     } else {
         const bool auth = !proxy.username.empty();
@@ -615,10 +716,111 @@ void TorrentEngine::setProxy(const ProxySettings& proxy) {
         pack.set_str(lt::settings_pack::proxy_username, proxy.username);
         pack.set_str(lt::settings_pack::proxy_password, proxy.password);
         pack.set_bool(lt::settings_pack::proxy_hostnames, true);
-        pack.set_bool(lt::settings_pack::proxy_peer_connections, true);
+        pack.set_bool(lt::settings_pack::proxy_peer_connections, !useRelay);
         pack.set_bool(lt::settings_pack::proxy_tracker_connections, true);
     }
     impl_->session->apply_settings(std::move(pack));
+}
+
+namespace {
+
+// "udp://tracker.example.org:6969/announce" -> its host, or empty for an address or
+// anything that isn't a UDP tracker.
+std::string udpTrackerName(const std::string& url) {
+    std::string scheme = url.substr(0, std::min<size_t>(url.size(), 6));
+    std::transform(scheme.begin(), scheme.end(), scheme.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (scheme != "udp://") return {};
+    const std::string host = InterfaceDns::hostOf(url);
+    return InterfaceDns::isIpLiteral(host) ? std::string() : host;
+}
+
+// The same tracker URL with its host replaced by an address.
+std::string withAddress(const std::string& url, const std::string& address) {
+    const size_t authorityStart = url.find("://") + 3;
+    size_t authorityEnd = url.find_first_of("/?#", authorityStart);
+    if (authorityEnd == std::string::npos) authorityEnd = url.size();
+    std::string authority = url.substr(authorityStart, authorityEnd - authorityStart);
+    if (const auto at = authority.rfind('@'); at != std::string::npos) authority = authority.substr(at + 1);
+    const auto colon = authority.rfind(':');
+    const std::string port = colon == std::string::npos ? std::string() : authority.substr(colon);
+    const std::string host = address.find(':') != std::string::npos ? "[" + address + "]" : address;
+    return url.substr(0, authorityStart) + host + port + url.substr(authorityEnd);
+}
+
+}
+
+void TorrentEngine::lockTrackers(DownloadId id, const lt::torrent_handle& handle) {
+    if (!handle.is_valid()) return;
+    const std::vector<lt::announce_entry> current = handle.trackers();
+    const std::set<std::string> seeds = handle.url_seeds();
+    std::string interfaceName;
+    {
+        std::scoped_lock lock(impl_->mutex);
+        auto it = impl_->entries.find(id);
+        if (it == impl_->entries.end() || it->second.trackersLocked) return;
+        it->second.trackersLocked = true;
+        it->second.originalTrackers = current;
+        it->second.originalUrlSeeds.assign(seeds.begin(), seeds.end());
+        interfaceName = impl_->settings.networkInterface;
+    }
+
+    std::vector<lt::announce_entry> kept;
+    std::vector<lt::announce_entry> named;
+    for (const lt::announce_entry& tracker : current) {
+        (udpTrackerName(tracker.url).empty() ? kept : named).push_back(tracker);
+    }
+    if (!named.empty()) handle.replace_trackers(kept);
+    // Web seeds are peer connections, which the relay doesn't carry.
+    for (const std::string& seed : seeds) handle.remove_url_seed(seed);
+    if (named.empty()) return;
+
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    std::jthread lookup([this, id, handle, named, interfaceName, done](std::stop_token stop) {
+        int added = 0;
+        for (const lt::announce_entry& tracker : named) {
+            if (stop.stop_requested()) break;
+            const std::vector<std::string> addresses = InterfaceDns::resolve(udpTrackerName(tracker.url), interfaceName);
+            if (addresses.empty()) continue;
+            // One address per tracker (IPv4 first: many VPNs carry no IPv6).
+            const auto v4 = std::find_if(addresses.begin(), addresses.end(), [](const std::string& a) { return a.find(':') == std::string::npos; });
+            lt::announce_entry entry(withAddress(tracker.url, v4 != addresses.end() ? *v4 : addresses.front()));
+            entry.tier = tracker.tier;
+            {
+                // Unlocked (or removed) meanwhile: the originals are back already.
+                std::scoped_lock lock(impl_->mutex);
+                const auto it = impl_->entries.find(id);
+                if (it == impl_->entries.end() || !it->second.trackersLocked || it->second.handle != handle) break;
+            }
+            handle.add_tracker(entry);
+            ++added;
+        }
+        ORBIT_LOG_INFO("TorrentEngine", "Download " + std::to_string(id) + ": " + std::to_string(added) + " of " +
+                                            std::to_string(named.size()) + " UDP trackers looked up through " + interfaceName);
+        done->store(true);
+    });
+    std::scoped_lock lock(impl_->lookupsMutex);
+    impl_->lookups.remove_if([](const Impl::Lookup& l) { return l.done->load(); });
+    impl_->lookups.push_back(Impl::Lookup{std::move(lookup), done});
+}
+
+void TorrentEngine::unlockTrackers(DownloadId id) {
+    lt::torrent_handle handle;
+    std::vector<lt::announce_entry> trackers;
+    std::vector<std::string> seeds;
+    {
+        std::scoped_lock lock(impl_->mutex);
+        auto it = impl_->entries.find(id);
+        if (it == impl_->entries.end() || !it->second.trackersLocked) return;
+        it->second.trackersLocked = false;
+        handle = it->second.handle;
+        trackers = std::move(it->second.originalTrackers);
+        seeds = std::move(it->second.originalUrlSeeds);
+        it->second.originalTrackers.clear();
+        it->second.originalUrlSeeds.clear();
+    }
+    if (!handle.is_valid()) return;
+    handle.replace_trackers(trackers);
+    for (const std::string& seed : seeds) handle.add_url_seed(seed);
 }
 
 void TorrentEngine::setNetworkInterface(const std::string& interfaceName) {
@@ -630,11 +832,44 @@ void TorrentEngine::setNetworkInterface(const std::string& interfaceName) {
                  interfaceName.empty() ? "0.0.0.0:" + port + ",[::]:" + port : interfaceName + ":" + port);
     pack.set_str(lt::settings_pack::outgoing_interfaces, interfaceName);
     pack.set_str(lt::settings_pack::dht_bootstrap_nodes, interfaceName.empty() ? kDefaultBootstrapNodes : "");
+    pack.set_bool(lt::settings_pack::enable_upnp, interfaceName.empty());
+    pack.set_bool(lt::settings_pack::enable_natpmp, interfaceName.empty());
     impl_->session->apply_settings(std::move(pack));
-    impl_->settings.networkInterface = interfaceName;
+    std::vector<std::pair<DownloadId, lt::torrent_handle>> torrents;
+    {
+        std::scoped_lock lock(impl_->mutex);
+        impl_->settings.networkInterface = interfaceName;
+        for (const auto& [id, entry] : impl_->entries) torrents.emplace_back(id, entry.handle);
+    }
+    applyProxy();
+    for (const auto& [id, handle] : torrents) {
+        if (interfaceName.empty()) unlockTrackers(id);
+        else lockTrackers(id, handle);
+    }
     if (!interfaceName.empty()) resolveBootstrapThrough(interfaceName);
     ORBIT_LOG_INFO("torrent", interfaceName.empty() ? std::string("Torrents use any network interface")
                                                     : "Torrents bound to network interface " + interfaceName);
+}
+
+void TorrentEngine::setListenPort(int port) {
+    port = std::clamp(port, 1024, 65535);
+    std::string interfaceName;
+    {
+        std::scoped_lock lock(impl_->mutex);
+        if (port == impl_->settings.listenPort) return;
+        impl_->settings.listenPort = port;
+        interfaceName = impl_->settings.networkInterface;
+    }
+    const std::string p = std::to_string(port);
+    lt::settings_pack pack;
+    pack.set_str(lt::settings_pack::listen_interfaces, interfaceName.empty() ? "0.0.0.0:" + p + ",[::]:" + p : interfaceName + ":" + p);
+    impl_->session->apply_settings(std::move(pack));
+    ORBIT_LOG_INFO("TorrentEngine", "Listening for peers on port " + p);
+}
+
+void TorrentEngine::setAddPublicTrackers(bool add) {
+    std::scoped_lock lock(impl_->mutex);
+    impl_->addPublicTrackers = add;
 }
 
 void TorrentEngine::setNoCowOnBtrfs(bool enabled) {
@@ -908,7 +1143,9 @@ std::string TorrentEngine::moveStorage(DownloadId id, const std::string& directo
     if (it == impl_->entries.end() || !it->second.handle.is_valid()) return "The torrent isn't loaded right now";
     utils::ensureDirectoryExists(directory);
     it->second.request.destinationDir = directory;
-    it->second.handle.move_storage(directory, lt::move_flags_t::always_replace_files);
+    // Never over someone else's files: if any are in the way, the move fails and says so
+    // (storage_moved_failed_alert -> "Couldn't move the torrent: File exists").
+    it->second.handle.move_storage(directory, lt::move_flags_t::fail_if_exist);
     return {};
 }
 
@@ -957,9 +1194,23 @@ void TorrentEngine::alertLoop(std::stop_token stopToken) {
             } else if (auto* meta = lt::alert_cast<lt::metadata_received_alert>(a)) {
                 // A magnet link's file list just arrived; no piece has been written yet.
                 bool noCow = false;
+                bool locked = false;
+                const DownloadId metaId = idForHandle(meta->handle);
                 {
                     std::scoped_lock lock(impl_->mutex);
                     noCow = impl_->noCowOnBtrfs;
+                    const auto it = impl_->entries.find(metaId);
+                    locked = it != impl_->entries.end() && it->second.trackersLocked;
+                }
+                if (locked) {
+                    // The metadata may name web seeds; under the lock they wait like the others.
+                    for (const std::string& seed : meta->handle.url_seeds()) {
+                        meta->handle.remove_url_seed(seed);
+                        std::scoped_lock lock(impl_->mutex);
+                        if (const auto it = impl_->entries.find(metaId); it != impl_->entries.end()) {
+                            it->second.originalUrlSeeds.push_back(seed);
+                        }
+                    }
                 }
                 if (noCow) {
                     if (const auto ti = meta->handle.torrent_file()) {

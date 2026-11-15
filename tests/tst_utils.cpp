@@ -1,4 +1,6 @@
+#include "TestHttpServer.hpp"
 #include "core/InterfaceDns.hpp"
+#include "core/InterfaceRelay.hpp"
 #include "core/UpdateFeed.hpp"
 #include "core/TorrentEngine.hpp"
 #include "core/MediaDownloader.hpp"
@@ -14,8 +16,13 @@
 #include <QJsonArray>
 #include <QFile>
 #include <QProcess>
+#include <QHostAddress>
+#include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QUrl>
+
+#include <openssl/evp.h>
 
 #include <chrono>
 #include <clocale>
@@ -35,6 +42,29 @@ void writeFile(const fs::path& path, const std::string& content) {
 std::string readFile(const fs::path& path) {
     std::ifstream in(path, std::ios::binary);
     return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+// Sends `request` to the relay and returns everything it answers until it hangs up. For a
+// CONNECT, `thenSend` goes through the tunnel once it's established.
+QByteArray throughRelay(int port, const QByteArray& request, const QByteArray& thenSend = {}) {
+    QTcpSocket socket;
+    socket.connectToHost(QHostAddress::LocalHost, static_cast<quint16>(port));
+    if (!socket.waitForConnected(3000)) return {};
+    socket.write(request);
+    QByteArray answer;
+    if (!thenSend.isEmpty()) {
+        while (!answer.contains("\r\n\r\n") && socket.waitForReadyRead(5000)) answer += socket.readAll();
+        if (!answer.startsWith("HTTP/1.1 200")) return answer;
+        socket.write(thenSend);
+    }
+    while (socket.state() == QAbstractSocket::ConnectedState && socket.waitForReadyRead(5000)) answer += socket.readAll();
+    answer += socket.readAll();
+    return answer;
+}
+
+QByteArray basicAuth(const orbit::core::ProxySettings& proxy) {
+    return "Proxy-Authorization: Basic " +
+           QByteArray::fromStdString(proxy.username + ":" + proxy.password).toBase64() + "\r\n";
 }
 
 }
@@ -128,6 +158,64 @@ private slots:
         QVERIFY(readUpdateFeed(windowsOnly, true).version.isNull());
     }
 
+    // Only an offer signed with the release key is installed; changing what it points at,
+    // or moving a signature to the other platform, breaks it.
+    void updateOffersMustBeSigned() {
+        EVP_PKEY* key = nullptr;
+        EVP_PKEY_CTX* gen = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
+        QVERIFY(gen && EVP_PKEY_keygen_init(gen) == 1 && EVP_PKEY_keygen(gen, &key) == 1);
+        EVP_PKEY_CTX_free(gen);
+        QByteArray publicKey(32, '\0');
+        size_t publicLength = 32;
+        QVERIFY(EVP_PKEY_get_raw_public_key(key, reinterpret_cast<unsigned char*>(publicKey.data()), &publicLength) == 1);
+        auto sign = [key](const QByteArray& message) {
+            QByteArray signature(64, '\0');
+            size_t length = 64;
+            EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+            EVP_DigestSignInit(ctx, nullptr, nullptr, nullptr, key);
+            EVP_DigestSign(ctx, reinterpret_cast<unsigned char*>(signature.data()), &length,
+                           reinterpret_cast<const unsigned char*>(message.constData()), static_cast<size_t>(message.size()));
+            EVP_MD_CTX_free(ctx);
+            return QString::fromLatin1(signature.toBase64());
+        };
+
+        using orbit::core::readUpdateFeed;
+        using orbit::core::updateSignedMessage;
+        using orbit::core::verifyUpdateSignature;
+        QJsonObject feed{{"version", "3.1.7"}, {"url", "https://example.org/OrbitSetup-3.1.7.exe"},
+                         {"sha256", QString(64, QLatin1Char('A'))}};
+        QJsonObject linux{{"version", "3.2.1"}, {"url", "https://example.org/OrbitSetup-3.2.1-linux.tar.gz"},
+                          {"sha256", QString(64, QLatin1Char('b'))}};
+        feed["signature"] = sign(updateSignedMessage(readUpdateFeed(feed, false), false));
+        linux["signature"] = sign(updateSignedMessage(readUpdateFeed(QJsonObject{{"linux", linux}}, true), true));
+        feed["linux"] = linux;
+
+        QVERIFY(verifyUpdateSignature(readUpdateFeed(feed, false), false, publicKey));
+        QVERIFY(verifyUpdateSignature(readUpdateFeed(feed, true), true, publicKey));
+        // The message is exactly what the website signs.
+        QCOMPARE(updateSignedMessage(readUpdateFeed(feed, false), false),
+                 QByteArray("orbit-update-v1\nwindows\n3.1.7\nhttps://example.org/OrbitSetup-3.1.7.exe\n" + QByteArray(64, 'a') + "\n"));
+
+        auto tampered = [&](const char* field, const QString& value) {
+            QJsonObject copy = feed;
+            copy[QLatin1String(field)] = value;
+            return verifyUpdateSignature(readUpdateFeed(copy, false), false, publicKey);
+        };
+        QVERIFY(!tampered("url", QStringLiteral("https://evil.example.net/OrbitSetup-3.1.7.exe")));
+        QVERIFY(!tampered("sha256", QString(64, QLatin1Char('c'))));
+        QVERIFY(!tampered("version", QStringLiteral("9.9.9")));
+        QVERIFY(!tampered("signature", QString()));
+        // A Windows signature doesn't vouch for the Linux entry (or the other way round).
+        QJsonObject swapped = feed;
+        QJsonObject swappedLinux = linux;
+        swappedLinux["signature"] = feed["signature"];
+        swapped["linux"] = swappedLinux;
+        QVERIFY(!verifyUpdateSignature(readUpdateFeed(swapped, true), true, publicKey));
+        // Another key's signature counts for nothing.
+        QVERIFY(!verifyUpdateSignature(readUpdateFeed(feed, false), false, QByteArray(32, 'k')));
+        EVP_PKEY_free(key);
+    }
+
     void noCowOnBtrfs() {
         // Run in the build folder: /tmp is usually tmpfs, where there's nothing to test.
         QTemporaryDir dir(QDir::currentPath() + QStringLiteral("/nocow-XXXXXX"));
@@ -200,6 +288,19 @@ private slots:
         QCOMPARE(sanitizeFileName("name. . "), std::string("name"));
         QCOMPARE(sanitizeFileName("..."), std::string("download"));
         QCOMPARE(sanitizeFileName(std::string("tab\there")), std::string("tab_here"));
+        // Long names (from a URL or Content-Disposition) are cut so the file can always be
+        // created: the extension stays, and no character is cut in half.
+        const std::string longAscii = sanitizeFileName(std::string(400, 'a') + ".tar.gz");
+        QCOMPARE(longAscii.size(), kMaxFileNameBytes);
+        QVERIFY(longAscii.ends_with("a.gz"));
+        std::string umlauts;
+        for (int i = 0; i < 150; ++i) umlauts += "\xC3\xA4";  // "ä", two bytes each
+        const std::string cut = sanitizeFileName(umlauts + ".mkv");
+        QVERIFY(cut.size() <= kMaxFileNameBytes);
+        QVERIFY(cut.ends_with(".mkv"));
+        QVERIFY(QString::fromUtf8(cut.data(), static_cast<qsizetype>(cut.size())).toUtf8().toStdString() == cut);
+        QCOMPARE((cut.size() - 4) % 2, std::size_t(0));  // only whole "ä"s
+        QCOMPARE(sanitizeFileName(std::string(50, 'b') + ".txt"), std::string(50, 'b') + ".txt");
     }
 
     void uniquePaths() {
@@ -295,6 +396,60 @@ private slots:
         QVERIFY(!extractDownloadUrl("orbit://add?url=file%3A%2F%2F%2Fetc%2Fx.torrent"));
         QVERIFY(!extractDownloadUrl("orbit://add?url=ftp%3A%2F%2Fhost%2Fx"));
     }
+
+#if defined(__linux__)
+    // The relay that keeps yt-dlp and HTTP trackers on a locked interface: CONNECT and
+    // plain absolute-form requests both arrive, bound to the interface (lo here).
+    void relayCarriesTunnelsAndPlainRequests() {
+        orbit::tests::TestHttpServer server;
+        server.setBehaviour({.payload = "through the relay"});
+        const QByteArray target = QUrl(QString::fromStdString(server.url())).authority().toLatin1();
+        orbit::core::InterfaceRelay relay;
+        QVERIFY(relay.setInterface("lo"));
+        const auto proxy = relay.proxy();
+        QVERIFY(proxy.enabled());
+        QCOMPARE(proxy.host, std::string("127.0.0.1"));
+
+        const QByteArray get = "GET /file.bin HTTP/1.1\r\nHost: " + target + "\r\nConnection: close\r\n\r\n";
+        const QByteArray tunneled =
+            throughRelay(proxy.port, "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n" + basicAuth(proxy) + "\r\n", get);
+        QVERIFY2(tunneled.startsWith("HTTP/1.1 200 Connection established"), tunneled.constData());
+        QVERIFY(tunneled.endsWith("through the relay"));
+
+        const QByteArray plain = throughRelay(proxy.port, "GET http://" + target + "/file.bin HTTP/1.1\r\nHost: " + target +
+                                                              "\r\n" + basicAuth(proxy) + "Proxy-Connection: keep-alive\r\n\r\n");
+        QVERIFY2(plain.startsWith("HTTP/1.1 200"), plain.constData());
+        QVERIFY(plain.endsWith("through the relay"));
+    }
+
+    void relayOnlyServesOrbitsOwnPrograms() {
+        orbit::tests::TestHttpServer server;
+        const QByteArray target = QUrl(QString::fromStdString(server.url())).authority().toLatin1();
+        orbit::core::InterfaceRelay relay;
+        QVERIFY(relay.setInterface("lo"));
+        const int port = relay.proxy().port;
+        QVERIFY(throughRelay(port, "CONNECT " + target + " HTTP/1.1\r\n\r\n").startsWith("HTTP/1.1 407"));
+        QVERIFY(throughRelay(port, "CONNECT " + target + " HTTP/1.1\r\nProxy-Authorization: Basic d3Jvbmc6Z3Vlc3M=\r\n\r\n")
+                    .startsWith("HTTP/1.1 407"));
+        // Turned off with the lock: nothing listens any more.
+        relay.setInterface("");
+        QVERIFY(!relay.proxy().enabled());
+        QVERIFY(throughRelay(port, "CONNECT " + target + " HTTP/1.1\r\n\r\n").isEmpty());
+    }
+
+    // A relay bound to an interface that doesn't exist can't reach anything, and says so
+    // instead of connecting some other way.
+    void relayFailsClosedOnAMissingInterface() {
+        orbit::tests::TestHttpServer server;
+        const QByteArray target = QUrl(QString::fromStdString(server.url())).authority().toLatin1();
+        orbit::core::InterfaceRelay relay;
+        QVERIFY(relay.setInterface("orbitnone0"));
+        const auto proxy = relay.proxy();
+        const QByteArray answer = throughRelay(proxy.port, "CONNECT " + target + " HTTP/1.1\r\n" + basicAuth(proxy) + "\r\n");
+        QVERIFY2(answer.startsWith("HTTP/1.1 502"), answer.constData());
+        QCOMPARE(server.getRequests(), 0);
+    }
+#endif
 
     void ytDlpNeverStartsInTheCurrentFolder() {
 #if defined(_WIN32)

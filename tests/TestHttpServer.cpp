@@ -17,6 +17,16 @@ class TestHttpServerWorker final : public QObject {
 public:
     explicit TestHttpServerWorker(TestHttpServer& owner) : owner_(owner) {}
 
+    // Qt deletes children after this destructor has run, and a socket closing then fires
+    // `disconnected`, whose handler would reach into this half-destroyed worker (a UBSan
+    // report that made tst_httpdownloader fail now and then). Silence and delete them first.
+    ~TestHttpServerWorker() override {
+        for (QTcpSocket* socket : findChildren<QTcpSocket*>()) {
+            socket->disconnect();
+            delete socket;
+        }
+    }
+
     quint16 listen() {
         server_ = new QTcpServer(this);
         connect(server_, &QTcpServer::newConnection, this, [this] {

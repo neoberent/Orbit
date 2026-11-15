@@ -18,6 +18,14 @@ Restart=on-failure
 RestartSec=5
 # SIGTERM saves torrent resume data and the download list before Orbit exits.
 TimeoutStopSec=30
+# Orbit (and yt-dlp, ffmpeg, bsdtar it starts) never needs more rights than the user has.
+# Only settings that work in a user service without extra kernel features: the stricter
+# ones (ProtectSystem, PrivateTmp, ...) need user namespaces and would keep it from starting
+# where those are off, and downloads may go anywhere in the home folder.
+NoNewPrivileges=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=default.target

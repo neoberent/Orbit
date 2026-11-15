@@ -376,13 +376,17 @@ void RemoteServer::setAllowedHosts(const QStringList& hosts) {
     }
 }
 
-bool RemoteServer::isAllowedOrigin(const QString& originHeader) const {
+bool RemoteServer::isAllowedOrigin(const QString& originHeader, const QString& hostHeader) const {
     // Browsers send Origin with every POST; scripts and curl usually don't. A page on
     // another site can't forge it, so a POST it makes is refused even if the session
     // cookie were to go along.
     if (originHeader.isEmpty()) return true;
     const QString h = normalizeHost(originHeader);
-    return !h.isEmpty() && h != QLatin1String("null") && isAllowedHost(h);
+    if (h.isEmpty() || h == QLatin1String("null")) return false;
+    if (h == QLatin1String("localhost") || h == QLatin1String("127.0.0.1") || h == QLatin1String("::1")) return true;
+    // Not the *.trycloudflare.com wildcard isAllowedHost accepts: anyone can open a quick
+    // tunnel, so only the one this request came through counts.
+    return h == normalizeHost(hostHeader) || allowedHosts_.contains(h);
 }
 
 bool RemoteServer::isAllowedHost(const QString& hostHeader) const {
@@ -408,7 +412,7 @@ void RemoteServer::handleRequest(QTcpSocket* socket, const ParsedHttpRequest& re
                           "Settings > Remote Access (Named Tunnel, step 6).\n");
         return;
     }
-    if (req.method == QLatin1String("POST") && !isAllowedOrigin(req.headers.value(QStringLiteral("origin")))) {
+    if (req.method == QLatin1String("POST") && !isAllowedOrigin(req.headers.value(QStringLiteral("origin")), host)) {
         ORBIT_LOG_WARN("RemoteServer", "Refused a request sent from another site (Origin \"" +
                                            req.headers.value(QStringLiteral("origin")).toStdString() + "\")");
         writeJsonError(socket, 403, "cross-site request refused");
@@ -621,8 +625,16 @@ void RemoteServer::handleAddTorrentFromUpload(QTcpSocket* socket, const ParsedHt
         return;
     }
 
+    // The uploads folder is purged after a day, but the torrent may need its .torrent again
+    // later (to restart before any resume data was written), so it moves somewhere lasting.
+    QString source = it->filePath;
+    const QString keptDir = QString::fromStdString((orbit::utils::appDataDir() / "torrents").string());
+    QDir().mkpath(keptDir);
+    const QString kept = keptDir + QLatin1Char('/') + QFileInfo(source).fileName();
+    if (QFile::rename(source, kept)) source = kept;
+
     DownloadRequest request;
-    request.source = it->filePath.toStdString();
+    request.source = source.toStdString();
     request.suggestedName = it->name.toStdString();
     request.destinationDir = manager_.defaultDownloadDir().string();
 
