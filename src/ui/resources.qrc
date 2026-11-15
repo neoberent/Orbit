@@ -55,6 +55,7 @@
         <file alias="ChecksumDialog.qml">qml/ChecksumDialog.qml</file>
         <file alias="WhenDoneDialog.qml">qml/WhenDoneDialog.qml</file>
         <file alias="ClipboardPrompt.qml">qml/ClipboardPrompt.qml</file>
+        <file alias="LinuxNewsDialog.qml">qml/LinuxNewsDialog.qml</file>
         <file alias="TabStrip.qml">qml/TabStrip.qml</file>
         <file alias="PieceMap.qml">qml/PieceMap.qml</file>
         <file alias="TorrentDetailsView.qml">qml/TorrentDetailsView.qml</file>

@@ -1,4 +1,5 @@
 #include "core/MediaDownloader.hpp"
+#include "core/UpdateFeed.hpp"
 #include "core/ProtocolHandler.hpp"
 #include "utils/FileUtils.hpp"
 #include "utils/Hashing.hpp"
@@ -6,6 +7,9 @@
 #include "utils/StringUtils.hpp"
 
 #include <QDir>
+#include <QVersionNumber>
+#include <QJsonObject>
+#include <QJsonArray>
 #include <QFile>
 #include <QTemporaryDir>
 #include <QTest>
@@ -39,6 +43,53 @@ private slots:
     // QCoreApplication adopts the system locale, and formatBytes() follows its decimal
     // separator; the expectations below are written for the C locale.
     void initTestCase() { std::setlocale(LC_NUMERIC, "C"); }
+
+    void updateFeedRules() {
+        using orbit::core::readUpdateFeed;
+        const QString sha(64, QLatin1Char('a'));
+        // The bridge feed: Windows 3.1.6 at the top, Linux 3.2.0 with its own version and
+        // notes, and news about it for Windows.
+        const QJsonObject bridge{
+            {"version", "3.1.6"}, {"url", "https://example.org/OrbitSetup-3.1.6.exe"}, {"sha256", sha},
+            {"notes", QJsonArray{"Windows: tells you about Linux releases"}}, {"released", "2026-11-20"},
+            {"linux", QJsonObject{{"version", "3.2.0"}, {"url", "https://example.org/OrbitSetup-3.2.0-linux.tar.gz"},
+                                  {"sha256", sha}, {"size", 123}, {"notes", QJsonArray{"Native Wayland"}}, {"released", "2026-11-20"}}},
+            {"linuxNews", QJsonObject{{"version", "3.2.0"}, {"notes", QJsonArray{"Native Wayland", "- Torrent feeds"}}}},
+        };
+        const auto win = readUpdateFeed(bridge, false);
+        QCOMPARE(win.version.toString(), QStringLiteral("3.1.6"));
+        QCOMPARE(win.url, QStringLiteral("https://example.org/OrbitSetup-3.1.6.exe"));
+        QCOMPARE(win.newsVersion.toString(), QStringLiteral("3.2.0"));
+        QCOMPARE(win.newsNotes, (QStringList{"Native Wayland", "Torrent feeds"}));
+        const auto lin = readUpdateFeed(bridge, true);
+        QCOMPARE(lin.version.toString(), QStringLiteral("3.2.0"));
+        QCOMPARE(lin.url, QStringLiteral("https://example.org/OrbitSetup-3.2.0-linux.tar.gz"));
+        QCOMPARE(lin.notes, QStringList{"Native Wayland"});
+        QVERIFY(lin.newsVersion.isNull());
+        // How Orbit 3.1.5 reads the same feed (top-level version for both platforms): Windows
+        // installs 3.1.6, Linux sees 3.1.6 > 3.1.5 and installs the "linux" archive (3.2.0).
+        QVERIFY(QVersionNumber::fromString(bridge.value("version").toString()) > QVersionNumber(3, 1, 5));
+
+        // Later: a Linux-only release; Windows is already on 3.1.6 and gets news only.
+        QJsonObject later = bridge;
+        QJsonObject linux = later.value("linux").toObject();
+        linux.insert("version", "3.3.0");
+        later.insert("linux", linux);
+        later.insert("linuxNews", QJsonObject{{"version", "3.3.0"}, {"notes", QJsonArray{"Something new"}}});
+        QCOMPARE(readUpdateFeed(later, false).version.toString(), QStringLiteral("3.1.6"));
+        QCOMPARE(readUpdateFeed(later, true).version.toString(), QStringLiteral("3.3.0"));
+
+        // A feed from before: no Linux version of its own, so Linux follows the top level.
+        const QJsonObject old{{"version", "3.1.5"}, {"url", "https://example.org/a.exe"}, {"sha256", sha},
+                              {"notes", QJsonArray{"fix"}}, {"linux", QJsonObject{{"url", "https://example.org/a.tar.gz"}, {"sha256", sha}}}};
+        QCOMPARE(readUpdateFeed(old, true).version.toString(), QStringLiteral("3.1.5"));
+        QCOMPARE(readUpdateFeed(old, true).notes, QStringList{"fix"});
+        // No Linux build at all: nothing to offer on Linux.
+        QJsonObject windowsOnly = old;
+        windowsOnly.remove("linux");
+        QVERIFY(readUpdateFeed(windowsOnly, true).version.isNull());
+    }
+
 
     void trimAndSplit() {
         QCOMPARE(trim("  a b \t\n"), std::string("a b"));
