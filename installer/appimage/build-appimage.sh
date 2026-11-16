@@ -39,11 +39,13 @@ for p in libqwayland-generic.so libqwayland-egl.so libqwayland.so; do
     if [ -f "$plugins/platforms/$p" ]; then wayland="${wayland:+$wayland;}$p"; fi
 done
 [ -n "$wayland" ] || echo "warning: this Qt has no Wayland platform plugin; the AppImage will use XWayland" >&2
+# --headless runs on Qt's offscreen platform (no display at all), which nothing links to either.
+[ -f "$plugins/platforms/libqoffscreen.so" ] || { echo "error: this Qt has no offscreen platform plugin (needed by --headless)" >&2; exit 1; }
 
 cd "$build"
 export QML_SOURCES_PATHS="$root/src/ui/qml"
 export EXTRA_QT_MODULES="svg"
-export EXTRA_PLATFORM_PLUGINS="$wayland"
+export EXTRA_PLATFORM_PLUGINS="libqoffscreen.so${wayland:+;$wayland}"
 export VERSION="$version"
 rm -f Orbit*.AppImage
 linuxdeploy-x86_64.AppImage --appdir AppDir --desktop-file orbit.desktop \
