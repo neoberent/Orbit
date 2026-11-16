@@ -90,7 +90,7 @@ jobs:
 
       - name: Build the AppImage
         run: |
-          export QMAKE="$QT_ROOT/bin/qmake" CMAKE_PREFIX_PATH="$QT_ROOT;$DEPS"
+          export QMAKE="$QT_ROOT/bin/qmake" CMAKE_PREFIX_PATH="$QT_ROOT:$DEPS"  # an environment list, so ":" on Linux
           export LD_LIBRARY_PATH="$DEPS/lib:$QT_ROOT/lib"
           installer/appimage/build-appimage.sh
 
