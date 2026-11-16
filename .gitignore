@@ -15,3 +15,6 @@ installer/aur/*/pkg/
 installer/aur/*/*.pkg.tar.zst
 installer/aur/*/*.tar.gz
 installer/aur/*/*.zip
+
+# Obsidian vault settings
+.obsidian/
