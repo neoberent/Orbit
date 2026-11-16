@@ -158,11 +158,131 @@ int connectThrough(const std::string& host, int port, const std::string& interfa
     return -1;
 }
 
+// Reads exactly size bytes, or fails after the head timeout.
+bool recvExact(int fd, char* data, size_t size) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kHeadTimeoutMs);
+    while (size > 0) {
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        if (left <= 0) return false;
+        pollfd wait{fd, POLLIN, 0};
+        const int ready = ::poll(&wait, 1, static_cast<int>(left));
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready <= 0) return false;
+        const ssize_t got = ::recv(fd, data, size, 0);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) return false;
+        data += got;
+        size -= static_cast<size_t>(got);
+    }
+    return true;
+}
+
+// Asks a SOCKS5 proxy (RFC 1928, user/password per RFC 1929) for a connection to
+// host:port. A name is passed as a name, so the proxy looks it up, not this machine.
+bool socks5Connect(int fd, const std::string& host, int port, const ProxySettings& proxy) {
+    const bool auth = !proxy.username.empty();
+    if (auth && (proxy.username.size() > 255 || proxy.password.size() > 255)) return false;
+    const std::string greeting = auth ? std::string("\x05\x02\x00\x02", 4) : std::string("\x05\x01\x00", 3);
+    unsigned char reply[2];
+    if (!sendAll(fd, greeting.data(), greeting.size()) || !recvExact(fd, reinterpret_cast<char*>(reply), 2) || reply[0] != 5) {
+        return false;
+    }
+    if (reply[1] == 2 && auth) {
+        std::string login(1, '\x01');
+        login += static_cast<char>(proxy.username.size());
+        login += proxy.username;
+        login += static_cast<char>(proxy.password.size());
+        login += proxy.password;
+        if (!sendAll(fd, login.data(), login.size()) || !recvExact(fd, reinterpret_cast<char*>(reply), 2) || reply[1] != 0) {
+            ORBIT_LOG_WARN("relay", "The SOCKS5 proxy refused Orbit's user name or password");
+            return false;
+        }
+    } else if (reply[1] != 0) {
+        return false;
+    }
+
+    std::string request("\x05\x01\x00", 3);
+    unsigned char address[16];
+    if (::inet_pton(AF_INET, host.c_str(), address) == 1) {
+        request += '\x01';
+        request.append(reinterpret_cast<const char*>(address), 4);
+    } else if (::inet_pton(AF_INET6, host.c_str(), address) == 1) {
+        request += '\x04';
+        request.append(reinterpret_cast<const char*>(address), 16);
+    } else {
+        if (host.size() > 255) return false;
+        request += '\x03';
+        request += static_cast<char>(host.size());
+        request += host;
+    }
+    request += static_cast<char>((port >> 8) & 0xFF);
+    request += static_cast<char>(port & 0xFF);
+    unsigned char head[4];
+    if (!sendAll(fd, request.data(), request.size()) || !recvExact(fd, reinterpret_cast<char*>(head), 4) || head[0] != 5) {
+        return false;
+    }
+    if (head[1] != 0) {
+        ORBIT_LOG_WARN("relay", "The SOCKS5 proxy couldn't connect to " + host + " (code " + std::to_string(head[1]) + ")");
+        return false;
+    }
+    // The address the proxy connected from, which nobody here needs.
+    size_t rest = 0;
+    if (head[3] == 1) rest = 4 + 2;
+    else if (head[3] == 4) rest = 16 + 2;
+    else if (head[3] == 3) {
+        unsigned char length = 0;
+        if (!recvExact(fd, reinterpret_cast<char*>(&length), 1)) return false;
+        rest = length + 2u;
+    } else {
+        return false;
+    }
+    char skip[258];
+    return recvExact(fd, skip, rest);
+}
+
+std::string proxyAuthorization(const ProxySettings& proxy) {
+    if (proxy.username.empty()) return {};
+    return "Proxy-Authorization: Basic " + base64(proxy.username + ":" + proxy.password) + "\r\n";
+}
+
+// Asks an HTTP proxy for a tunnel to authority ("host:port"). Bytes the proxy sent
+// after its answer (none, normally) are returned in extra.
+bool httpConnect(int fd, const std::string& authority, const ProxySettings& proxy, std::string& extra) {
+    const std::string request = "CONNECT " + authority + " HTTP/1.1\r\nHost: " + authority + "\r\n" +
+                                proxyAuthorization(proxy) + "\r\n";
+    if (!sendAll(fd, request.data(), request.size())) return false;
+    std::string answer;
+    size_t end = std::string::npos;
+    char chunk[1024];
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kHeadTimeoutMs);
+    while ((end = answer.find("\r\n\r\n")) == std::string::npos) {
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        if (left <= 0 || answer.size() > kMaxHeadBytes) return false;
+        pollfd wait{fd, POLLIN, 0};
+        const int ready = ::poll(&wait, 1, static_cast<int>(left));
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready <= 0) return false;
+        const ssize_t got = ::recv(fd, chunk, sizeof(chunk), 0);
+        if (got <= 0) return false;
+        answer.append(chunk, static_cast<size_t>(got));
+    }
+    // "HTTP/1.1 200 Connection established"
+    const auto space = answer.find(' ');
+    const bool ok = space != std::string::npos && answer.size() > space + 1 && answer[space + 1] == '2';
+    if (!ok) {
+        ORBIT_LOG_WARN("relay", "The HTTP proxy refused a tunnel to " + authority + ": " + answer.substr(0, answer.find("\r\n")));
+        return false;
+    }
+    extra = answer.substr(end + 4);
+    return true;
+}
+
 }
 
 struct InterfaceRelay::State {
     std::mutex mutex;
     std::string interfaceName;
+    ProxySettings upstream;
     int listenFd{-1};
     int port{0};
     std::string username;
@@ -179,6 +299,10 @@ struct InterfaceRelay::State {
     std::string currentInterface() {
         std::scoped_lock lock(mutex);
         return interfaceName;
+    }
+    ProxySettings currentUpstream() {
+        std::scoped_lock lock(mutex);
+        return upstream;
     }
 };
 
@@ -303,21 +427,41 @@ void handleClient(int client, const std::shared_ptr<InterfaceRelay::State>& stat
         return;
     }
 
-    const int server = connectThrough(host, port, interfaceName);
+    // To the user's proxy, when there is one, or straight to the host; either way through
+    // the interface.
+    const ProxySettings upstream = state->currentUpstream();
+    const bool viaProxy = upstream.enabled();
+    const bool viaHttpProxy = viaProxy && upstream.type != ProxySettings::Type::Socks5;
+    const int server = viaProxy ? connectThrough(upstream.host, upstream.port, interfaceName)
+                                : connectThrough(host, port, interfaceName);
     if (server < 0) {
-        ORBIT_LOG_WARN("relay", "Couldn't reach " + host + " through " + interfaceName);
+        ORBIT_LOG_WARN("relay", "Couldn't reach " + (viaProxy ? "the proxy " + upstream.host : host) + " through " + interfaceName);
         replyStatus(client, "502 Bad Gateway");
         return;
     }
-
+    const std::string hostPort = (host.find(':') != std::string::npos ? "[" + host + "]" : host) + ":" + std::to_string(port);
+    std::string fromProxy;  // bytes an HTTP proxy sent past its CONNECT answer
     bool ok = true;
+    if (viaProxy && !viaHttpProxy) ok = socks5Connect(server, host, port, upstream);
+    else if (viaHttpProxy && tunnel) ok = httpConnect(server, hostPort, upstream, fromProxy);
+    if (!ok) {
+        replyStatus(client, "502 Bad Gateway");
+        ::close(server);
+        return;
+    }
+
     if (tunnel) {
         static const std::string kEstablished = "HTTP/1.1 200 Connection established\r\n\r\n";
         ok = sendAll(client, kEstablished.data(), kEstablished.size());
+        if (ok && !fromProxy.empty()) ok = sendAll(client, fromProxy.data(), fromProxy.size());
     } else {
-        std::string request = method + " " + path + " " + version + "\r\n";
+        // An HTTP proxy takes the absolute URL (without user info) and its own credentials;
+        // a server or a SOCKS tunnel takes just the path.
+        const std::string requestTarget = viaHttpProxy ? "http://" + authority + path : path;
+        std::string request = method + " " + requestTarget + " " + version + "\r\n";
         if (!hasHost) request += "Host: " + authority + "\r\n";
         for (const std::string& line : forwarded) request += line + "\r\n";
+        if (viaHttpProxy) request += proxyAuthorization(upstream);
         // One request per connection, so the next one (maybe for another host) comes
         // through the relay again.
         request += "Connection: close\r\n\r\n";
@@ -429,7 +573,15 @@ bool InterfaceRelay::setInterface(const std::string& interfaceName) {
     }
     std::scoped_lock lock(state_->mutex);
     state_->interfaceName = interfaceName;
+    state_->upstream = upstream_;
     return true;
+}
+
+void InterfaceRelay::setUpstream(const ProxySettings& upstream) {
+    upstream_ = upstream;
+    if (!state_) return;
+    std::scoped_lock lock(state_->mutex);
+    state_->upstream = upstream;
 }
 
 ProxySettings InterfaceRelay::proxy() const {
@@ -449,6 +601,7 @@ struct InterfaceRelay::State {};
 InterfaceRelay::InterfaceRelay() = default;
 InterfaceRelay::~InterfaceRelay() = default;
 bool InterfaceRelay::setInterface(const std::string& interfaceName) { return interfaceName.empty(); }
+void InterfaceRelay::setUpstream(const ProxySettings&) {}
 ProxySettings InterfaceRelay::proxy() const { return {}; }
 
 #endif

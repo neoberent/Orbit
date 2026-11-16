@@ -18,6 +18,10 @@ namespace orbit::core {
 // It speaks CONNECT (for https) and plain absolute-form requests (http://host/path), and
 // only to a client that sends its random credentials (Basic Proxy-Authorization). Linux
 // only; elsewhere it never starts.
+//
+// With an upstream proxy (the user's own), every connection goes to that proxy instead,
+// still through the interface: its name is looked up there, and a SOCKS5 proxy is given
+// the target's name to resolve itself, so the user's proxy and the lock work together.
 class InterfaceRelay {
 public:
     InterfaceRelay();
@@ -30,6 +34,10 @@ public:
     // False when it should run but couldn't start listening.
     bool setInterface(const std::string& interfaceName);
 
+    // The user's own proxy (HTTP or SOCKS5) every connection goes through; Type::None
+    // connects directly. Takes effect for new connections.
+    void setUpstream(const ProxySettings& upstream);
+
     // What to hand clients: an HTTP proxy at 127.0.0.1 with the credentials. Disabled
     // (Type::None) while the relay isn't running.
     [[nodiscard]] ProxySettings proxy() const;
@@ -38,6 +46,7 @@ public:
 
 private:
     std::shared_ptr<State> state_;
+    ProxySettings upstream_;  // kept here too, for a relay started later
 };
 
 }

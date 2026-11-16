@@ -172,6 +172,12 @@ struct TorrentEngine::Impl {
     mutable std::mutex mutex;
     std::unordered_map<DownloadId, Entry> entries;
 
+    // Bumped by every applyProxy, so a slow lookup of the proxy's name can't overwrite
+    // newer proxy settings; proxyApplyMutex orders the two writers.
+    // Both outlive the lookups below, which use them.
+    std::atomic<unsigned> proxyGeneration{0};
+    std::mutex proxyApplyMutex;
+
     // Background lookups of locked torrents' UDP trackers. Declared after the entries
     // they update (and the session), so they're stopped and joined before those go.
     struct Lookup {
@@ -180,6 +186,7 @@ struct TorrentEngine::Impl {
     };
     std::mutex lookupsMutex;
     std::list<Lookup> lookups;
+
 
     // Looks up the DHT's bootstrap routers through the locked interface. Declared last, so
     // it's stopped and joined before the session it configures goes away.
@@ -687,39 +694,91 @@ void TorrentEngine::setRelayProxy(const ProxySettings& relay) {
     applyProxy();
 }
 
+namespace {
+
+lt::settings_pack proxyPack(const ProxySettings& proxy, bool relayOnlyForTrackers) {
+    lt::settings_pack pack;
+    if (!proxy.enabled()) {
+        pack.set_int(lt::settings_pack::proxy_type, lt::settings_pack::none);
+        return pack;
+    }
+    const bool auth = !proxy.username.empty();
+    const int type = proxy.type == ProxySettings::Type::Socks5
+                         ? (auth ? lt::settings_pack::socks5_pw : lt::settings_pack::socks5)
+                         : (auth ? lt::settings_pack::http_pw : lt::settings_pack::http);
+    pack.set_int(lt::settings_pack::proxy_type, type);
+    pack.set_str(lt::settings_pack::proxy_hostname, proxy.host);
+    pack.set_int(lt::settings_pack::proxy_port, proxy.port);
+    pack.set_str(lt::settings_pack::proxy_username, proxy.username);
+    pack.set_str(lt::settings_pack::proxy_password, proxy.password);
+    pack.set_bool(lt::settings_pack::proxy_hostnames, true);
+    pack.set_bool(lt::settings_pack::proxy_peer_connections, !relayOnlyForTrackers);
+    pack.set_bool(lt::settings_pack::proxy_tracker_connections, true);
+    return pack;
+}
+
+}
+
 void TorrentEngine::applyProxy() {
     ProxySettings user;
     ProxySettings relay;
-    bool locked = false;
+    std::string interfaceName;
     {
         std::scoped_lock lock(impl_->mutex);
         user = impl_->userProxy;
         relay = impl_->relayProxy;
-        locked = !impl_->settings.networkInterface.empty();
+        interfaceName = impl_->settings.networkInterface;
     }
+    const bool locked = !interfaceName.empty();
     // The user's own proxy carries everything. The relay only carries the HTTP(S)
     // trackers (their names then never reach the system resolver): peers and the DHT are
     // bound to the interface by libtorrent itself, and UDP trackers go by address.
     const bool useRelay = !user.enabled() && locked && relay.enabled();
-    const ProxySettings& proxy = user.enabled() ? user : relay;
-    lt::settings_pack pack;
-    if (!user.enabled() && !useRelay) {
-        pack.set_int(lt::settings_pack::proxy_type, lt::settings_pack::none);
-    } else {
-        const bool auth = !proxy.username.empty();
-        const int type = proxy.type == ProxySettings::Type::Socks5
-                             ? (auth ? lt::settings_pack::socks5_pw : lt::settings_pack::socks5)
-                             : (auth ? lt::settings_pack::http_pw : lt::settings_pack::http);
-        pack.set_int(lt::settings_pack::proxy_type, type);
-        pack.set_str(lt::settings_pack::proxy_hostname, proxy.host);
-        pack.set_int(lt::settings_pack::proxy_port, proxy.port);
-        pack.set_str(lt::settings_pack::proxy_username, proxy.username);
-        pack.set_str(lt::settings_pack::proxy_password, proxy.password);
-        pack.set_bool(lt::settings_pack::proxy_hostnames, true);
-        pack.set_bool(lt::settings_pack::proxy_peer_connections, !useRelay);
-        pack.set_bool(lt::settings_pack::proxy_tracker_connections, true);
+    ProxySettings proxy = user.enabled() ? user : (useRelay ? relay : ProxySettings{});
+    // Locked, libtorrent would look the proxy's own name up with the system resolver,
+    // outside the interface. It gets the address looked up through the interface instead;
+    // until then a closed local port, so nothing goes anywhere else meanwhile.
+    const bool lookUpProxy = locked && user.enabled() && !InterfaceDns::isIpLiteral(user.host);
+    ProxySettings applied = proxy;
+    if (lookUpProxy) {
+        applied.host = "127.0.0.1";
+        applied.port = 9;  // discard: refused, and no credentials go to it
+        applied.username.clear();
+        applied.password.clear();
     }
-    impl_->session->apply_settings(std::move(pack));
+    const unsigned generation = ++impl_->proxyGeneration;
+    {
+        std::scoped_lock lock(impl_->proxyApplyMutex);
+        impl_->session->apply_settings(proxyPack(applied, useRelay));
+    }
+    if (!lookUpProxy) return;
+
+    // In the lookups list (joined when the engine goes), so a newer call never waits for it.
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    std::jthread lookup([this, proxy, interfaceName, generation, done](std::stop_token stop) {
+        struct Done {
+            std::atomic<bool>& flag;
+            ~Done() { flag.store(true); }
+        } markDone{*done};
+        const std::vector<std::string> addresses = InterfaceDns::resolve(proxy.host, interfaceName);
+        if (stop.stop_requested()) return;
+        if (addresses.empty()) {
+            ORBIT_LOG_WARN("TorrentEngine", "Couldn't look up the proxy " + proxy.host + " through " + interfaceName +
+                                                "; torrents wait until the interface is back");
+            return;
+        }
+        // IPv4 first: many VPNs carry no IPv6.
+        const auto v4 = std::find_if(addresses.begin(), addresses.end(), [](const std::string& a) { return a.find(':') == std::string::npos; });
+        ProxySettings resolved = proxy;
+        resolved.host = v4 != addresses.end() ? *v4 : addresses.front();
+        std::scoped_lock lock(impl_->proxyApplyMutex);
+        if (impl_->proxyGeneration.load() != generation) return;  // newer settings meanwhile
+        impl_->session->apply_settings(proxyPack(resolved, false));
+        ORBIT_LOG_INFO("TorrentEngine", "Proxy " + proxy.host + " looked up through " + interfaceName);
+    });
+    std::scoped_lock lock(impl_->lookupsMutex);
+    impl_->lookups.remove_if([](const Impl::Lookup& l) { return l.done->load(); });
+    impl_->lookups.push_back(Impl::Lookup{std::move(lookup), done});
 }
 
 namespace {

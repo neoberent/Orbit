@@ -238,16 +238,18 @@ QProcessEnvironment MediaDownloader::processEnvironment() const {
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     std::scoped_lock lock(optionsMutex_);
     QString url;
-    if (proxy_.enabled()) {
+    if (!networkInterface_.empty()) {
+        // Locked: everything goes through the relay, which reaches the user's proxy (if
+        // any) through the interface too. yt-dlp sends every request, names included, to
+        // it and looks nothing up itself; ffmpeg follows the same variables.
+        if (!relay_.enabled()) return env;
+        url = QString::fromStdString(relay_.url(true));
+    } else if (proxy_.enabled() && !proxy_.username.empty()) {
         // A proxy with a password goes in the environment, which only this user can read,
         // rather than in --proxy, which anyone on the system sees in `ps`.
-        if (proxy_.username.empty()) return env;
         url = QString::fromStdString(proxy_.url(true));
     } else {
-        if (networkInterface_.empty() || !relay_.enabled()) return env;
-        // yt-dlp sends every request, names included, to this proxy and looks nothing up
-        // itself; ffmpeg follows the same variables.
-        url = QString::fromStdString(relay_.url(true));
+        return env;
     }
     for (const char* name : {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"}) {
         env.insert(QString::fromLatin1(name), url);
@@ -258,12 +260,10 @@ QProcessEnvironment MediaDownloader::processEnvironment() const {
 }
 
 QString MediaDownloader::lockProblem() const {
-    bool viaRelay = false;
     {
         std::scoped_lock lock(optionsMutex_);
         if (networkInterface_.empty()) return {};
-        viaRelay = !proxy_.enabled();
-        if (viaRelay && !relay_.enabled()) {
+        if (!relay_.enabled()) {
             return QStringLiteral("Orbit couldn't start the relay that keeps video downloads on the locked network interface");
         }
     }
@@ -305,17 +305,17 @@ QStringList MediaDownloader::commonArguments(DownloadId id, const DownloadReques
     QStringList args{QStringLiteral("--encoding"), QStringLiteral("utf-8")};
     ProxySettings proxy;
     QString browser;
+    bool locked = false;
     {
         std::scoped_lock lock(optionsMutex_);
         proxy = proxy_;
         browser = cookiesFromBrowser_;
+        locked = !networkInterface_.empty();
     }
-    if (proxy.enabled()) {
-        // With a password, processEnvironment() passes it instead (yt-dlp reads *_PROXY).
-        if (proxy.username.empty()) args << QStringLiteral("--proxy") << QString::fromStdString(proxy.url(false));
-        // Without the relay, the address is all that ties yt-dlp to a locked interface.
-        const QString source = sourceAddress();
-        if (!source.isEmpty() && source != QLatin1String("!")) args << QStringLiteral("--source-address") << source;
+    // Locked, the relay carries everything (the user's proxy included) and comes through
+    // the environment; so does a proxy with a password (yt-dlp reads *_PROXY).
+    if (proxy.enabled() && !locked && proxy.username.empty()) {
+        args << QStringLiteral("--proxy") << QString::fromStdString(proxy.url(false));
     }
     // Cookies captured from the browser session win over reading a browser's cookie store.
     bool skipBrowser = false;

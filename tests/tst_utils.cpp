@@ -28,6 +28,16 @@
 #include <clocale>
 #include <fstream>
 #include <thread>
+#include <atomic>
+#include <mutex>
+
+#if defined(__linux__)
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 using namespace orbit::utils;
@@ -61,6 +71,170 @@ QByteArray throughRelay(int port, const QByteArray& request, const QByteArray& t
     answer += socket.readAll();
     return answer;
 }
+
+#if defined(__linux__)
+// A stand-in for the user's own proxy in the relay tests. It speaks SOCKS5 (with user
+// name and password) or HTTP (CONNECT and absolute-form requests), writes down what the
+// relay asked it for, then connects to 127.0.0.1 at the requested port and passes bytes
+// through. With refuse set, it turns every request down.
+class FakeUpstream {
+public:
+    FakeUpstream(bool socks, bool refuse = false) : socks_(socks), refuse_(refuse) {
+        listenFd_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t length = sizeof(address);
+        ::bind(listenFd_, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+        ::listen(listenFd_, 8);
+        ::getsockname(listenFd_, reinterpret_cast<sockaddr*>(&address), &length);
+        port = ntohs(address.sin_port);
+        thread_ = std::thread([this] { serve(); });
+    }
+    ~FakeUpstream() {
+        stop_ = true;
+        thread_.join();
+        ::close(listenFd_);
+    }
+    std::string seen() {
+        std::scoped_lock lock(mutex_);
+        return seen_;
+    }
+
+    int port{0};
+
+private:
+    void note(const std::string& text) {
+        std::scoped_lock lock(mutex_);
+        seen_ += text + "\n";
+    }
+    static bool readExact(int fd, char* data, size_t size) {
+        while (size > 0) {
+            const ssize_t got = ::recv(fd, data, size, 0);
+            if (got <= 0) return false;
+            data += got;
+            size -= static_cast<size_t>(got);
+        }
+        return true;
+    }
+    static int connectLocal(int targetPort) {
+        const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = htons(static_cast<uint16_t>(targetPort));
+        if (::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+            ::close(fd);
+            return -1;
+        }
+        return fd;
+    }
+    static void pass(int a, int b, const std::string& first = {}) {
+        if (!first.empty()) ::send(b, first.data(), first.size(), MSG_NOSIGNAL);
+        char buffer[16384];
+        bool open[2] = {true, true};
+        int fds[2] = {a, b};
+        while (open[0] || open[1]) {
+            pollfd wait[2] = {{a, static_cast<short>(open[0] ? POLLIN : 0), 0}, {b, static_cast<short>(open[1] ? POLLIN : 0), 0}};
+            if (::poll(wait, 2, 5000) <= 0) return;
+            for (int i = 0; i < 2; ++i) {
+                if (!open[i] || !(wait[i].revents & (POLLIN | POLLHUP | POLLERR))) continue;
+                const ssize_t got = ::recv(fds[i], buffer, sizeof(buffer), 0);
+                if (got <= 0) {
+                    open[i] = false;
+                    ::shutdown(fds[1 - i], SHUT_WR);
+                } else {
+                    ::send(fds[1 - i], buffer, static_cast<size_t>(got), MSG_NOSIGNAL);
+                }
+            }
+        }
+    }
+    void serveSocks(int client) {
+        unsigned char head[2];
+        if (!readExact(client, reinterpret_cast<char*>(head), 2)) return;
+        std::string methods(head[1], '\0');
+        if (!readExact(client, methods.data(), methods.size())) return;
+        ::send(client, "\x05\x02", 2, MSG_NOSIGNAL);  // user name and password
+        unsigned char version = 0, length = 0;
+        if (!readExact(client, reinterpret_cast<char*>(&version), 1) || !readExact(client, reinterpret_cast<char*>(&length), 1)) return;
+        std::string user(length, '\0');
+        if (!readExact(client, user.data(), user.size()) || !readExact(client, reinterpret_cast<char*>(&length), 1)) return;
+        std::string password(length, '\0');
+        if (!readExact(client, password.data(), password.size())) return;
+        note("login " + user + ":" + password);
+        if (refuse_) {
+            ::send(client, "\x01\x01", 2, MSG_NOSIGNAL);
+            return;
+        }
+        ::send(client, "\x01\x00", 2, MSG_NOSIGNAL);
+        unsigned char request[4];
+        if (!readExact(client, reinterpret_cast<char*>(request), 4) || request[3] != 3) {
+            note("not a name");
+            return;
+        }
+        if (!readExact(client, reinterpret_cast<char*>(&length), 1)) return;
+        std::string name(length, '\0');
+        unsigned char portBytes[2];
+        if (!readExact(client, name.data(), name.size()) || !readExact(client, reinterpret_cast<char*>(portBytes), 2)) return;
+        const int targetPort = portBytes[0] << 8 | portBytes[1];
+        note("connect " + name + ":" + std::to_string(targetPort));
+        const int server = connectLocal(targetPort);
+        if (server < 0) return;
+        ::send(client, "\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00", 10, MSG_NOSIGNAL);
+        pass(client, server);
+        ::close(server);
+    }
+    void serveHttp(int client) {
+        std::string head;
+        char c;
+        while (head.find("\r\n\r\n") == std::string::npos && ::recv(client, &c, 1, 0) == 1) head += c;
+        note(head);
+        if (refuse_) {
+            const std::string no = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+            ::send(client, no.data(), no.size(), MSG_NOSIGNAL);
+            return;
+        }
+        const std::string line = head.substr(0, head.find("\r\n"));
+        const auto targetStart = line.find(' ') + 1;
+        std::string target = line.substr(targetStart, line.find(' ', targetStart) - targetStart);
+        const bool tunnel = line.rfind("CONNECT ", 0) == 0;
+        if (!tunnel) target = target.substr(7, target.find('/', 7) - 7);  // http://host:port/path
+        const int server = connectLocal(std::atoi(target.substr(target.rfind(':') + 1).c_str()));
+        if (server < 0) return;
+        if (tunnel) {
+            ::send(client, "HTTP/1.1 200 OK\r\n\r\n", 19, MSG_NOSIGNAL);
+            pass(client, server);
+        } else {
+            // On to the server in origin form: "GET /path HTTP/1.1".
+            std::string forwarded = head;
+            forwarded.erase(targetStart, line.find('/', targetStart + 7) - targetStart);
+            pass(client, server, forwarded);
+        }
+        ::close(server);
+    }
+    void serve() {
+        while (!stop_) {
+            pollfd wait{listenFd_, POLLIN, 0};
+            if (::poll(&wait, 1, 100) <= 0) continue;
+            const int client = ::accept4(listenFd_, nullptr, nullptr, SOCK_CLOEXEC);
+            if (client < 0) continue;
+            timeval timeout{5, 0};
+            ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+            if (socks_) serveSocks(client);
+            else serveHttp(client);
+            ::close(client);
+        }
+    }
+
+    bool socks_;
+    bool refuse_;
+    int listenFd_{-1};
+    std::atomic<bool> stop_{false};
+    std::thread thread_;
+    std::mutex mutex_;
+    std::string seen_;
+};
+#endif
 
 QByteArray basicAuth(const orbit::core::ProxySettings& proxy) {
     return "Proxy-Authorization: Basic " +
@@ -449,7 +623,158 @@ private slots:
         QVERIFY2(answer.startsWith("HTTP/1.1 502"), answer.constData());
         QCOMPARE(server.getRequests(), 0);
     }
+    // With the user's own proxy, the relay goes through it: a SOCKS5 proxy gets the
+    // credentials and the target's name (so this machine never looks it up).
+    void relayChainsThroughASocks5Proxy() {
+        orbit::tests::TestHttpServer server;
+        server.setBehaviour({.payload = "via socks"});
+        const int serverPort = QUrl(QString::fromStdString(server.url())).port();
+        const QByteArray target = "localhost:" + QByteArray::number(serverPort);
+        FakeUpstream upstream(true);
+        orbit::core::InterfaceRelay relay;
+        orbit::core::ProxySettings mine;
+        mine.type = orbit::core::ProxySettings::Type::Socks5;
+        mine.host = "127.0.0.1";
+        mine.port = upstream.port;
+        mine.username = "me";
+        mine.password = "pa:ss";
+        relay.setUpstream(mine);  // before the relay starts: kept for it
+        QVERIFY(relay.setInterface("lo"));
+        const auto proxy = relay.proxy();
+
+        const QByteArray get = "GET /file.bin HTTP/1.1\r\nHost: " + target + "\r\nConnection: close\r\n\r\n";
+        const QByteArray tunneled =
+            throughRelay(proxy.port, "CONNECT " + target + " HTTP/1.1\r\n" + basicAuth(proxy) + "\r\n", get);
+        QVERIFY2(tunneled.startsWith("HTTP/1.1 200 Connection established"), tunneled.constData());
+        QVERIFY(tunneled.endsWith("via socks"));
+        const QByteArray plain = throughRelay(proxy.port, "GET http://" + target + "/file.bin HTTP/1.1\r\nHost: " + target +
+                                                              "\r\n" + basicAuth(proxy) + "\r\n");
+        QVERIFY2(plain.endsWith("via socks"), plain.constData());
+        const std::string seen = upstream.seen();
+        QVERIFY2(seen.find("login me:pa:ss") != std::string::npos, seen.c_str());
+        QVERIFY2(seen.find("connect localhost:" + std::to_string(serverPort)) != std::string::npos, seen.c_str());
+        QVERIFY2(seen.find("not a name") == std::string::npos, seen.c_str());
+    }
+
+    // An HTTP proxy gets a CONNECT for https and the absolute URL for plain http, each
+    // with the user's credentials and never the relay's own.
+    void relayChainsThroughAnHttpProxy() {
+        orbit::tests::TestHttpServer server;
+        server.setBehaviour({.payload = "via http proxy"});
+        const QByteArray target = "localhost:" + QByteArray::number(QUrl(QString::fromStdString(server.url())).port());
+        FakeUpstream upstream(false);
+        orbit::core::InterfaceRelay relay;
+        QVERIFY(relay.setInterface("lo"));
+        orbit::core::ProxySettings mine;
+        mine.type = orbit::core::ProxySettings::Type::Http;
+        mine.host = "127.0.0.1";
+        mine.port = upstream.port;
+        mine.username = "me";
+        mine.password = "secret";
+        relay.setUpstream(mine);  // while running: used from the next connection
+        const auto proxy = relay.proxy();
+
+        const QByteArray get = "GET /file.bin HTTP/1.1\r\nHost: " + target + "\r\nConnection: close\r\n\r\n";
+        const QByteArray tunneled =
+            throughRelay(proxy.port, "CONNECT " + target + " HTTP/1.1\r\n" + basicAuth(proxy) + "\r\n", get);
+        QVERIFY2(tunneled.endsWith("via http proxy"), tunneled.constData());
+        const QByteArray plain = throughRelay(proxy.port, "GET http://" + target + "/file.bin HTTP/1.1\r\nHost: " + target +
+                                                              "\r\n" + basicAuth(proxy) + "\r\n");
+        QVERIFY2(plain.endsWith("via http proxy"), plain.constData());
+
+        const std::string seen = upstream.seen();
+        const std::string mineAuth = "Proxy-Authorization: Basic " + QByteArray("me:secret").toBase64().toStdString();
+        QVERIFY2(seen.find("CONNECT " + target.toStdString() + " HTTP/1.1") != std::string::npos, seen.c_str());
+        QVERIFY2(seen.find("GET http://" + target.toStdString() + "/file.bin HTTP/1.1") != std::string::npos, seen.c_str());
+        size_t count = 0;
+        for (size_t at = seen.find(mineAuth); at != std::string::npos; at = seen.find(mineAuth, at + 1)) ++count;
+        QCOMPARE(count, size_t(2));
+        QVERIFY2(seen.find(basicAuth(proxy).trimmed().toStdString()) == std::string::npos, seen.c_str());
+    }
+
+    // A proxy that turns the relay down means a failed connection, never a direct one.
+    void relayFailsWhenTheProxyRefuses() {
+        orbit::tests::TestHttpServer server;
+        const QByteArray target = "localhost:" + QByteArray::number(QUrl(QString::fromStdString(server.url())).port());
+        for (const bool socks : {true, false}) {
+            FakeUpstream upstream(socks, true);
+            orbit::core::InterfaceRelay relay;
+            orbit::core::ProxySettings mine;
+            mine.type = socks ? orbit::core::ProxySettings::Type::Socks5 : orbit::core::ProxySettings::Type::Http;
+            mine.host = "127.0.0.1";
+            mine.port = upstream.port;
+            mine.username = "me";
+            mine.password = "wrong";
+            relay.setUpstream(mine);
+            QVERIFY(relay.setInterface("lo"));
+            const auto proxy = relay.proxy();
+            const QByteArray answer = throughRelay(proxy.port, "CONNECT " + target + " HTTP/1.1\r\n" + basicAuth(proxy) + "\r\n");
+            QVERIFY2(answer.startsWith("HTTP/1.1 502"), answer.constData());
+        }
+        QCOMPARE(server.getRequests(), 0);
+    }
 #endif
+
+    // What yt-dlp is handed for the user's proxy: locked, only the relay (which reaches the
+    // proxy through the interface) and never --proxy or --source-address; unlocked, a
+    // password only ever in the environment, never in the command line others can read.
+    void ytDlpProxyGoesWhereItShould() {
+#if !defined(__linux__)
+        QSKIP("the relay and the stand-in script are Linux-only");
+#else
+        QTemporaryDir fakeDir;
+        QVERIFY(fakeDir.isValid());
+        const QString record = fakeDir.filePath(QStringLiteral("seen.txt"));
+        const QString script = fakeDir.filePath(QStringLiteral("yt-dlp"));
+        writeFile(script.toStdString(), "#!/bin/sh\necho \"args: $*\" > '" + record.toStdString() +
+                                            "'\necho \"env: $HTTPS_PROXY\" >> '" + record.toStdString() + "'\nexit 1\n");
+        QFile::setPermissions(script, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+        orbit::core::MediaDownloader::setYtDlpPathOverride(script);
+
+        orbit::core::ProxySettings mine;
+        mine.type = orbit::core::ProxySettings::Type::Socks5;
+        mine.host = "proxy.example";
+        mine.port = 1080;
+        mine.username = "me";
+        mine.password = "hunter2";
+        orbit::core::ProxySettings relay;
+        relay.type = orbit::core::ProxySettings::Type::Http;
+        relay.host = "127.0.0.1";
+        relay.port = 4321;
+        relay.username = "relayuser";
+        relay.password = "relaypass";
+
+        const auto run = [&](const orbit::core::ProxySettings& proxy, const std::string& interfaceName) {
+            QFile::remove(record);
+            orbit::core::MediaDownloader media(orbit::core::ProgressReporter{});
+            media.setProxy(proxy);
+            media.setRelayProxy(relay);
+            media.setNetworkInterface(interfaceName);
+            bool finished = false;
+            media.fetchInfo(QStringLiteral("https://example.com/v"), {}, [&](const orbit::core::MediaInfo&) { finished = true; });
+            [&] { QTRY_VERIFY_WITH_TIMEOUT(finished, 10000); }();
+            return readFile(record.toStdString());
+        };
+
+        const std::string locked = run(mine, "lo");
+        QVERIFY2(locked.find("env: http://relayuser:relaypass@127.0.0.1:4321") != std::string::npos, locked.c_str());
+        QVERIFY2(locked.find("--proxy") == std::string::npos, locked.c_str());
+        QVERIFY2(locked.find("--source-address") == std::string::npos, locked.c_str());
+        QVERIFY2(locked.find("hunter2") == std::string::npos, locked.c_str());
+
+        const std::string withPassword = run(mine, "");
+        QVERIFY2(withPassword.find("env: socks5h://me:hunter2@proxy.example:1080") != std::string::npos, withPassword.c_str());
+        QVERIFY2(withPassword.find("--proxy") == std::string::npos, withPassword.c_str());
+
+        orbit::core::ProxySettings open = mine;
+        open.username.clear();
+        open.password.clear();
+        const std::string withoutPassword = run(open, "");
+        QVERIFY2(withoutPassword.find("--proxy socks5h://proxy.example:1080") != std::string::npos, withoutPassword.c_str());
+
+        orbit::core::MediaDownloader::setYtDlpPathOverride({});
+#endif
+    }
 
     void ytDlpNeverStartsInTheCurrentFolder() {
 #if defined(_WIN32)

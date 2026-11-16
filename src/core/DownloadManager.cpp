@@ -823,6 +823,8 @@ const std::filesystem::path& DownloadManager::defaultDownloadDir() const noexcep
 }
 
 void DownloadManager::setProxy(const ProxySettings& proxy) {
+    // While the interface is locked, video downloads reach the proxy through the relay.
+    relay_->setUpstream(proxy);
     httpDownloader_->setProxy(proxy);
     torrentEngine_->setProxy(proxy);
     mediaDownloader_->setProxy(proxy);
