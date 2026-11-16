@@ -1,0 +1,31 @@
+name: Flatpak
+
+# Builds installer/flatpak/io.github.neoberent.Orbit.yml in the KDE SDK, so the manifest
+# is proven to build (nothing here publishes it), then checks the result starts.
+
+on:
+  push:
+    branches: [main, linux-ux]
+    paths: ['installer/flatpak/**', 'src/**', 'CMakeLists.txt', '.github/workflows/flatpak.yml']
+  workflow_dispatch:
+
+jobs:
+  flatpak:
+    name: Build the Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:kde-6.9
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: orbit.flatpak
+          manifest-path: installer/flatpak/io.github.neoberent.Orbit.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+
+      - name: Start it
+        run: |
+          flatpak install -y --noninteractive orbit.flatpak
+          flatpak run io.github.neoberent.Orbit --version
