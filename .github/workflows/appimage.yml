@@ -120,7 +120,8 @@ jobs:
           name: orbit-appimage
 
       # What any desktop has but a bare container doesn't: the GL/EGL drivers, fontconfig,
-      # D-Bus and X client libraries (an AppImage leaves those to the system), and certificates.
+      # D-Bus and X client libraries (an AppImage leaves those to the system), and certificates;
+      # diffutils only for the test's cmp (Fedora and Arch images lack it).
       - name: Install the system's basics
         run: |
           if command -v apt-get >/dev/null; then
@@ -129,9 +130,9 @@ jobs:
               libglib2.0-0 libfreetype6 curl
           elif command -v dnf >/dev/null; then
             dnf install -y ca-certificates mesa-libGL mesa-libEGL libglvnd-opengl fontconfig dbus-libs libxkbcommon \
-              libX11 glib2 freetype curl
+              libX11 glib2 freetype curl diffutils
           elif command -v pacman >/dev/null; then
-            pacman -Syu --noconfirm ca-certificates libglvnd mesa fontconfig dbus libxkbcommon libx11 glib2 freetype2 curl
+            pacman -Syu --noconfirm ca-certificates libglvnd mesa fontconfig dbus libxkbcommon libx11 glib2 freetype2 curl diffutils
           fi
 
       - name: Start headless, check status, download a file

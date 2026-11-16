@@ -7,11 +7,25 @@ dest=$(cd "$(dirname "$0")" && pwd)
 data=${XDG_DATA_HOME:-$HOME/.local/share}
 config=${XDG_CONFIG_HOME:-$HOME/.config}
 
-if pgrep -x -u "$(id -u)" orbit >/dev/null 2>&1; then
-    pkill -TERM -x -u "$(id -u)" orbit || true
+# Only processes running this install's program, not anything else called "orbit". A
+# replaced or removed binary shows as "<path> (deleted)".
+installed_pids() {
+    for proc in /proc/[0-9]*; do
+        case $(readlink "$proc/exe" 2>/dev/null) in
+            "$1/orbit" | "$1/orbit (deleted)") echo "${proc#/proc/}" ;;
+        esac
+    done
+}
+stop_installed() {
+    pids=$(installed_pids "$1")
+    [ -n "$pids" ] || return 0
+    echo "Closing the running Orbit..."
+    # shellcheck disable=SC2086
+    kill -TERM $pids 2>/dev/null || true
     i=0
-    while pgrep -x -u "$(id -u)" orbit >/dev/null 2>&1 && [ $i -lt 100 ]; do sleep 0.2; i=$((i + 1)); done
-fi
+    while [ -n "$(installed_pids "$1")" ] && [ $i -lt 100 ]; do sleep 0.2; i=$((i + 1)); done
+}
+stop_installed "$dest"
 
 for dir in .config/google-chrome .config/google-chrome-beta .config/google-chrome-unstable .config/chromium \
            .config/BraveSoftware/Brave-Browser .config/microsoft-edge .config/microsoft-edge-beta .config/vivaldi \
@@ -33,12 +47,21 @@ if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-datab
 if [ "$(readlink "$HOME/.local/bin/orbit" 2>/dev/null)" = "$dest/orbit" ]; then rm -f "$HOME/.local/bin/orbit"; fi
 
 if [ "${1:-}" = "--purge" ]; then
-    rm -rf "$config/Orbit" "$data/orbit"
+    # Older versions kept their data in ~/.local/share/orbit even with XDG_DATA_HOME set.
+    rm -rf "$config/Orbit" "$data/orbit" "$HOME/.local/share/orbit"
     echo "Removed Orbit's settings and download list."
 fi
 
+# Everything a release archive puts here (an in-app update unpacks the whole archive, so
+# install.sh, orbit.png and share/ are here too), plus what an interrupted update leaves.
+# Only Orbit's own names: anything else in the folder stays, and then so does the folder.
 if [ -f "$dest/orbit" ] && [ -f "$dest/orbit-native-host" ]; then
-    rm -f "$dest/orbit" "$dest/orbit-native-host" "$dest/License.txt" "$dest/PrivacyPolicy.txt" "$dest/Inter-LICENSE.txt" "$dest/uninstall.sh"
+    rm -f "$dest/orbit" "$dest/orbit-native-host" "$dest/License.txt" "$dest/PrivacyPolicy.txt" "$dest/Inter-LICENSE.txt" \
+          "$dest/install.sh" "$dest/orbit.png" "$dest"/*.orbit-new "$dest/uninstall.sh"
+    rm -rf "$dest/share/completions" "$dest"/.orbit-update.* "$dest"/.orbit-backup.*
+    rm -f "$dest/share/orbit.service" "$dest/share/orbit-torrent.desktop" "$dest/share/orbit-links.desktop" \
+          "$dest/share/nautilus-download-with-orbit"
+    rmdir "$dest/share" 2>/dev/null || true
     rmdir "$dest" 2>/dev/null || true
 fi
 echo "Orbit was uninstalled."

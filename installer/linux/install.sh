@@ -51,12 +51,25 @@ if [ -n "$missing" ]; then
 fi
 
 # A running Orbit would keep the old binary; ask it to quit and wait for it.
-if pgrep -x -u "$(id -u)" orbit >/dev/null 2>&1; then
+# Only processes running this install's program, not anything else called "orbit". A
+# replaced or removed binary shows as "<path> (deleted)".
+installed_pids() {
+    for proc in /proc/[0-9]*; do
+        case $(readlink "$proc/exe" 2>/dev/null) in
+            "$1/orbit" | "$1/orbit (deleted)") echo "${proc#/proc/}" ;;
+        esac
+    done
+}
+stop_installed() {
+    pids=$(installed_pids "$1")
+    [ -n "$pids" ] || return 0
     echo "Closing the running Orbit..."
-    pkill -TERM -x -u "$(id -u)" orbit || true
+    # shellcheck disable=SC2086
+    kill -TERM $pids 2>/dev/null || true
     i=0
-    while pgrep -x -u "$(id -u)" orbit >/dev/null 2>&1 && [ $i -lt 100 ]; do sleep 0.2; i=$((i + 1)); done
-fi
+    while [ -n "$(installed_pids "$1")" ] && [ $i -lt 100 ]; do sleep 0.2; i=$((i + 1)); done
+}
+if [ -d "$dest" ]; then stop_installed "$(cd "$dest" && pwd)"; fi
 
 mkdir -p "$dest"
 dest=$(cd "$dest" && pwd)
