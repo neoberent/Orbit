@@ -17,7 +17,9 @@
 #include <QFileInfo>
 #include <QImage>
 #include <QProcess>
+#include <QCryptographicHash>
 #include <QSaveFile>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QUrl>
 #include <QVariantMap>
@@ -280,7 +282,7 @@ void registerDesktopEntry(const QString& executablePath) {
     }
 }
 
-void installMissingExtras(const QString& appDir) {
+void syncExtras(const QString& appDir) {
     const QString share = appDir + QStringLiteral("/share");
     if (!QFileInfo(share).isDir()) return;  // a build folder, or a package without extras
     const QString exe = appDir + QStringLiteral("/orbit");
@@ -312,13 +314,38 @@ void installMissingExtras(const QString& appDir) {
         {QStringLiteral("orbit-links.desktop"), data + QStringLiteral("/kio/servicemenus/orbit-links.desktop"), execPath, true, dolphin},
         {QStringLiteral("nautilus-download-with-orbit"), data + QStringLiteral("/nautilus/scripts/Download with Orbit"), plainPath, true, nautilus},
     };
+    // A file Orbit wrote is replaced when a newer release brings a different version; one
+    // the user changed since (e.g. `systemctl --user edit --full orbit`) is left alone. What
+    // Orbit last wrote is remembered by its hash; a file with no record is adopted when it
+    // already matches, and otherwise only replaced if it isn't the service.
+    const auto hashOf = [](const QByteArray& bytes) {
+        return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+    };
+    QSettings settings;
     int added = 0;
+    int updated = 0;
+    bool serviceChanged = false;
     for (const Extra& extra : extras) {
-        if (!extra.wanted || QFileInfo::exists(extra.to)) continue;
+        if (!extra.wanted) continue;
         QFile in(share + QLatin1Char('/') + extra.from);
         if (!in.open(QIODevice::ReadOnly)) continue;
         QByteArray content = in.readAll();
         if (!extra.orbit.isEmpty()) content.replace("@ORBIT@", extra.orbit.toUtf8());
+        const QString key = QStringLiteral("linux/extras/") + QString(extra.from).replace(QLatin1Char('/'), QLatin1Char('_'));
+        const QString newHash = hashOf(content);
+        const bool exists = QFileInfo::exists(extra.to);
+        if (exists) {
+            QFile current(extra.to);
+            if (!current.open(QIODevice::ReadOnly)) continue;
+            const QString currentHash = hashOf(current.readAll());
+            if (currentHash == newHash) {
+                settings.setValue(key, newHash);  // already up to date
+                continue;
+            }
+            const QString recorded = settings.value(key).toString();
+            const bool ours = recorded.isEmpty() ? extra.from != QStringLiteral("orbit.service") : recorded == currentHash;
+            if (!ours) continue;
+        }
         QDir().mkpath(QFileInfo(extra.to).absolutePath());
         QSaveFile out(extra.to);
         if (!out.open(QIODevice::WriteOnly)) continue;
@@ -329,9 +356,18 @@ void installMissingExtras(const QString& appDir) {
                                                             QFileDevice::ExeOther)
                                                          : (QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadGroup |
                                                             QFileDevice::ReadOther));
-        ++added;
+        settings.setValue(key, newHash);
+        if (extra.from == QStringLiteral("orbit.service")) serviceChanged = true;
+        ++(exists ? updated : added);
     }
-    if (added > 0) ORBIT_LOG_INFO("main", "Added " + std::to_string(added) + " missing extras (completions, service, menus)");
+    if (serviceChanged) {
+        const QString systemctl = QStandardPaths::findExecutable(QStringLiteral("systemctl"));
+        if (!systemctl.isEmpty()) QProcess::startDetached(systemctl, {QStringLiteral("--user"), QStringLiteral("daemon-reload")});
+    }
+    if (added + updated > 0) {
+        ORBIT_LOG_INFO("main", "Extras (completions, service, menus): " + std::to_string(added) + " added, " +
+                                   std::to_string(updated) + " updated");
+    }
 }
 
 QString protectSecret(const QString& plain) {

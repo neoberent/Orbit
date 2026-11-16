@@ -1718,10 +1718,11 @@ void MainWindow::repairBrowserIntegration() {
         emit browserIntegrationChanged();
         return;
     }
-    // Extras an in-app update can't add (completions, the headless service, menus), for a
+    // Extras an in-app update copies but does not install (completions, the headless service,
+    // menus): added when missing, refreshed when Orbit wrote them, for a
     // user install in a writable folder. A system package installs its own.
     if (packaging.empty() && QFileInfo(QCoreApplication::applicationDirPath()).isWritable()) {
-        linux_integration::installMissingExtras(QCoreApplication::applicationDirPath());
+        linux_integration::syncExtras(QCoreApplication::applicationDirPath());
     }
     // An AppImage runs from a temporary mount: the menu entry points at the AppImage file.
     const QString appImage = qEnvironmentVariable("APPIMAGE");
