@@ -237,10 +237,18 @@ void MediaDownloader::setRelayProxy(const ProxySettings& relay) {
 QProcessEnvironment MediaDownloader::processEnvironment() const {
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     std::scoped_lock lock(optionsMutex_);
-    if (networkInterface_.empty() || proxy_.enabled() || !relay_.enabled()) return env;
-    // yt-dlp sends every request, names included, to this proxy and looks nothing up
-    // itself; ffmpeg follows the same variables.
-    const QString url = QString::fromStdString(relay_.url(true));
+    QString url;
+    if (proxy_.enabled()) {
+        // A proxy with a password goes in the environment, which only this user can read,
+        // rather than in --proxy, which anyone on the system sees in `ps`.
+        if (proxy_.username.empty()) return env;
+        url = QString::fromStdString(proxy_.url(true));
+    } else {
+        if (networkInterface_.empty() || !relay_.enabled()) return env;
+        // yt-dlp sends every request, names included, to this proxy and looks nothing up
+        // itself; ffmpeg follows the same variables.
+        url = QString::fromStdString(relay_.url(true));
+    }
     for (const char* name : {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"}) {
         env.insert(QString::fromLatin1(name), url);
     }
@@ -303,7 +311,8 @@ QStringList MediaDownloader::commonArguments(DownloadId id, const DownloadReques
         browser = cookiesFromBrowser_;
     }
     if (proxy.enabled()) {
-        args << QStringLiteral("--proxy") << QString::fromStdString(proxy.url(true));
+        // With a password, processEnvironment() passes it instead (yt-dlp reads *_PROXY).
+        if (proxy.username.empty()) args << QStringLiteral("--proxy") << QString::fromStdString(proxy.url(false));
         // Without the relay, the address is all that ties yt-dlp to a locked interface.
         const QString source = sourceAddress();
         if (!source.isEmpty() && source != QLatin1String("!")) args << QStringLiteral("--source-address") << source;
