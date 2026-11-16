@@ -1,10 +1,10 @@
 # Flatpak build of Orbit.
-#   flatpak install flathub org.kde.Sdk//6.9 org.kde.Platform//6.9
+#   flatpak install flathub org.kde.Sdk//6.10 org.kde.Platform//6.10
 #   flatpak-builder --user --install --force-clean build-flatpak installer/flatpak/io.github.neoberent.Orbit.yml
 # (run from the repository root)
 app-id: io.github.neoberent.Orbit
 runtime: org.kde.Platform
-runtime-version: '6.9'
+runtime-version: '6.10'
 sdk: org.kde.Sdk
 command: orbit
 rename-icon: orbit
