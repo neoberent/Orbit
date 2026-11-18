@@ -87,6 +87,7 @@ TaskSnapshot DownloadTask::snapshot() const {
     snap.options.hasBrowserSession = !request_.cookies.empty();
     snap.options.destinationDir = request_.destinationDir;
     snap.options.fromWebLink = request_.fromWebLink;
+    snap.options.referrer = request_.referrer;
     return snap;
 }
 

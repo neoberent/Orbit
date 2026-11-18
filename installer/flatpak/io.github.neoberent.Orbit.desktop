@@ -11,3 +11,19 @@ MimeType=x-scheme-handler/orbit;application/x-bittorrent;x-scheme-handler/magnet
 StartupNotify=true
 StartupWMClass=orbit
 Keywords=download;torrent;magnet;youtube;
+Actions=new-download;pause-all;resume-all;
+
+[Desktop Action new-download]
+Name=New Download
+Icon=list-add
+Exec=orbit new
+
+[Desktop Action pause-all]
+Name=Pause All
+Icon=media-playback-pause
+Exec=orbit pause --all
+
+[Desktop Action resume-all]
+Name=Resume All
+Icon=media-playback-start
+Exec=orbit resume --all

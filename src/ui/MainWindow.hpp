@@ -96,6 +96,8 @@ class MainWindow final : public QObject {
     Q_PROPERTY(bool unpackArchives READ unpackArchives WRITE setUnpackArchives NOTIFY afterDownloadChanged)
     // A command run for every finished download; %f = the file, %d = its folder, %n = its name.
     Q_PROPERTY(QString afterCommand READ afterCommand WRITE setAfterCommand NOTIFY afterDownloadChanged)
+    // Record each finished file's link and page as xattrs (Linux; file managers show them).
+    Q_PROPERTY(bool rememberOrigin READ rememberOrigin WRITE setRememberOrigin NOTIFY afterDownloadChanged)
 
     // The network interface every download is bound to ("" = any), e.g. a VPN's wg0.
     Q_PROPERTY(QString networkInterface READ networkInterface WRITE setNetworkInterface NOTIFY networkInterfaceChanged)
@@ -252,6 +254,10 @@ public:
     void setUnpackArchives(bool enabled);
     [[nodiscard]] QString afterCommand() const { return afterCommand_; }
     void setAfterCommand(const QString& command);
+    [[nodiscard]] bool rememberOrigin() const noexcept { return rememberOrigin_; }
+    void setRememberOrigin(bool enabled);
+    // Records where a download that just finished came from (see rememberOrigin).
+    void tagOrigin(qlonglong id);
     // Runs the after-download actions for a download that just finished.
     void runAfterDownload(qlonglong id);
 
@@ -370,6 +376,8 @@ signals:
     // count downloads were paused because the connection became metered.
     void meteredPaused(int count);
     void showWindowRequested();
+    // `orbit new` (the launcher's "New Download" action): open the add dialog.
+    void addDialogRequested();
 
 private:
     void applyRemoteServerState();
@@ -451,6 +459,7 @@ private:
     bool sortByType_{false};
     QVariantMap typeFolders_;
     bool unpackArchives_{false};
+    bool rememberOrigin_{true};
     QString afterCommand_;
     QString networkInterface_;
     bool pauseOnMetered_{true};

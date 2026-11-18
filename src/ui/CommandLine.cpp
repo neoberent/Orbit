@@ -75,6 +75,7 @@ const char* const kUsage =
     "  remote set-password <user>   Set its sign-in; asks for the password (or reads\n"
     "                               one line from standard input)\n"
     "  show                         Open Orbit's window\n"
+    "  new                          Open the window to add a download\n"
     "  help                         Show this help\n"
     "\n"
     "Options:\n"
@@ -399,7 +400,8 @@ int runCommand(const QString& command, const QStringList& args) {
     }
 
     QLocalSocket* socket = connectToOrbit(300);
-    if (!socket && (isAdd || command == QLatin1String("show"))) {
+    const bool opensWindow = command == QLatin1String("show") || command == QLatin1String("new");
+    if (!socket && (isAdd || opensWindow)) {
         // Adding (or showing) is worth starting Orbit for; it stays in the tray.
         QStringList launchArgs;
         if (isAdd) launchArgs << QStringLiteral("--background");
@@ -480,8 +482,8 @@ int runCommand(const QString& command, const QStringList& args) {
                 printLine(QStringLiteral("%1 %2 download%3").arg(verb).arg(changed).arg(changed == 1 ? "" : "s"));
             }
         }
-    } else if (command == QLatin1String("show")) {
-        request(QJsonObject{{"type", "show"}});
+    } else if (opensWindow) {
+        request(QJsonObject{{"type", "show"}, {"add", command == QLatin1String("new")}});
     } else if (command == QLatin1String("config")) {
         const QString action = positional.value(0, QStringLiteral("list"));
         const qsizetype wanted = action == QLatin1String("set") ? 3 : action == QLatin1String("get") ? 2 : 1;
@@ -593,7 +595,7 @@ std::optional<int> run(int argc, char* argv[]) {
     }
     static const QStringList commands{
         QStringLiteral("add"), QStringLiteral("list"), QStringLiteral("status"), QStringLiteral("pause"),
-        QStringLiteral("resume"), QStringLiteral("cancel"), QStringLiteral("remove"), QStringLiteral("show"),
+        QStringLiteral("resume"), QStringLiteral("cancel"), QStringLiteral("remove"), QStringLiteral("show"), QStringLiteral("new"),
         QStringLiteral("feeds"), QStringLiteral("config"), QStringLiteral("remote"),
     };
     if (!commands.contains(command)) return std::nullopt;

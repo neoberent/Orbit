@@ -182,6 +182,12 @@ ApplicationWindow {
 
     Connections {
         target: appController
+        function onAddDialogRequested() {
+            window.showNormal()
+            window.raise()
+            window.requestActivate()
+            if (!addDialog.visible) window.openAddDialog()
+        }
         function onExternalTorrentNeedsReview(source) {
             window.showNormal()
             window.raise()

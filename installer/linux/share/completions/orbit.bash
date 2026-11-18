@@ -7,7 +7,7 @@ _orbit() {
     cmd=${COMP_WORDS[1]}
 
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=($(compgen -W "add list ls status pause resume cancel remove rm show feeds config remote help --background --headless --version" -- "$cur"))
+        COMPREPLY=($(compgen -W "add list ls status pause resume cancel remove rm show new feeds config remote help --background --headless --version" -- "$cur"))
         return
     fi
     case $cmd in

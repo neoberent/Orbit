@@ -101,6 +101,22 @@ Categories=Network;FileTransfer;
 MimeType=x-scheme-handler/orbit;application/x-bittorrent;
 StartupNotify=true
 StartupWMClass=orbit
+Actions=new-download;pause-all;resume-all;
+
+[Desktop Action new-download]
+Name=New Download
+Icon=list-add
+Exec="$exec_path" new
+
+[Desktop Action pause-all]
+Name=Pause All
+Icon=media-playback-pause
+Exec="$exec_path" pause --all
+
+[Desktop Action resume-all]
+Name=Resume All
+Icon=media-playback-start
+Exec="$exec_path" resume --all
 DESKTOP
 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database "$apps" >/dev/null 2>&1 || true; fi
 if command -v xdg-mime >/dev/null 2>&1; then xdg-mime default orbit.desktop x-scheme-handler/orbit 2>/dev/null || true; fi

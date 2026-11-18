@@ -180,6 +180,15 @@ ColumnLayout {
             }
         }
         SettingsRow {
+            visible: Qt.platform.os === "linux"
+            label: "Remember where files came from"
+            description: "Saves the link and its page with the file, as browsers do; file managers show it. Sign-in details are left out."
+            ToggleSwitch {
+                checked: appController.rememberOrigin
+                onToggled: appController.rememberOrigin = checked
+            }
+        }
+        SettingsRow {
             label: "Run a command"
             description: "%f is the file, %d its folder, %n its name. Run directly, without a shell; not included in backups."
             FormField {

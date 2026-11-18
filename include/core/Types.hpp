@@ -197,6 +197,7 @@ struct TaskOptions {
     bool hasBrowserSession{false};
     std::string destinationDir;
     bool fromWebLink{false};
+    std::string referrer;  // the page the link was on, when the browser said so
 };
 
 struct TaskSnapshot {

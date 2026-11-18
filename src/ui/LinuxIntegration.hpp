@@ -41,6 +41,17 @@ void setBlurBehind(quintptr windowId, bool enabled);
 // Opens the file manager with the file selected (org.freedesktop.FileManager1).
 bool revealInFileManager(const QString& filePath);
 
+// Records where a finished download came from, as browsers on Linux do: the link in
+// user.xdg.origin.url and the page it was on in user.xdg.referrer.url. Dolphin and
+// Files show these. Sign-in details in a link are left out, and only http(s) and ftp
+// links are recorded. False when nothing could be written (e.g. no user xattrs on that
+// file system).
+bool tagDownloadOrigin(const QString& filePath, const QString& origin, const QString& referrer);
+
+// The link as tagDownloadOrigin stores it: empty unless http(s) or ftp, without a
+// username or password.
+QString originForTag(const QString& url);
+
 // Writes ~/.local/share/applications/orbit.desktop for this executable, listing
 // orbit:// links and .torrent files, and makes Orbit the orbit:// handler. Like the
 // Windows registration, an existing default app for .torrent files is left alone.

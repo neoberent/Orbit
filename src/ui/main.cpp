@@ -351,7 +351,10 @@ int main(int argc, char* argv[]) {
     // After-download actions run here, in C++, so they work headless too.
     QObject::connect(&downloadModel, &DownloadListModel::transferFinished, &controller,
                      [&controller](qlonglong id, const QString&, bool success, const QString&) {
-                         if (success) controller.runAfterDownload(id);
+                         if (success) {
+                             controller.tagOrigin(id);  // before any command sees the file
+                             controller.runAfterDownload(id);
+                         }
                          controller.retryIfWorthIt(id);  // also forgets the tries of one that finished
                      });
     QObject::connect(&controller, &MainWindow::afterDownloadNotice, &trayController,

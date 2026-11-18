@@ -62,6 +62,22 @@ Categories=Network;FileTransfer;
 MimeType=x-scheme-handler/orbit;application/x-bittorrent;
 StartupNotify=true
 StartupWMClass=orbit
+Actions=new-download;pause-all;resume-all;
+
+[Desktop Action new-download]
+Name=New Download
+Icon=list-add
+Exec=/usr/bin/orbit new
+
+[Desktop Action pause-all]
+Name=Pause All
+Icon=media-playback-pause
+Exec=/usr/bin/orbit pause --all
+
+[Desktop Action resume-all]
+Name=Resume All
+Icon=media-playback-start
+Exec=/usr/bin/orbit resume --all
 DESKTOP
 
     # Shell completions, the headless user service and "Download with Orbit" for Dolphin

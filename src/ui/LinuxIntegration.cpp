@@ -29,9 +29,12 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 namespace linux_integration {
@@ -239,6 +242,32 @@ void setBlurBehind(quintptr windowId, bool enabled) {
     xcb_flush(connection);
 }
 
+QString originForTag(const QString& url) {
+    QUrl parsed(url.trimmed());
+    if (!parsed.isValid()) return {};
+    const QString scheme = parsed.scheme().toLower();
+    if (scheme != QLatin1String("http") && scheme != QLatin1String("https") && scheme != QLatin1String("ftp")) return {};
+    parsed.setUserInfo(QString());
+    return QString::fromLatin1(parsed.toEncoded(QUrl::FullyEncoded));
+}
+
+bool tagDownloadOrigin(const QString& filePath, const QString& origin, const QString& referrer) {
+    const QByteArray path = QFile::encodeName(filePath);
+    bool wrote = false;
+    for (const auto& [name, value] : {std::pair{"user.xdg.origin.url", originForTag(origin)},
+                                      std::pair{"user.xdg.referrer.url", originForTag(referrer)}}) {
+        if (value.isEmpty()) continue;
+        const QByteArray bytes = value.toUtf8();
+        // lsetxattr: never through a symlink the download may have become.
+        if (::lsetxattr(path.constData(), name, bytes.constData(), static_cast<size_t>(bytes.size()), 0) == 0) {
+            wrote = true;
+        } else if (errno != ENOTSUP) {
+            ORBIT_LOG_WARN("after", std::string("Couldn't record ") + name + " on " + filePath.toStdString() + ": " + std::strerror(errno));
+        }
+    }
+    return wrote;
+}
+
 void registerDesktopEntry(const QString& executablePath) {
     const QString dataHome = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
     const QString appsDir = dataHome + QStringLiteral("/applications");
@@ -262,7 +291,23 @@ void registerDesktopEntry(const QString& executablePath) {
         "Categories=Network;FileTransfer;\n"
         "MimeType=x-scheme-handler/orbit;application/x-bittorrent;\n"
         "StartupNotify=true\n"
-        "StartupWMClass=orbit\n").arg(desktopExecQuote(executablePath));
+        "StartupWMClass=orbit\n"
+        "Actions=new-download;pause-all;resume-all;\n"
+        "\n"
+        "[Desktop Action new-download]\n"
+        "Name=New Download\n"
+        "Icon=list-add\n"
+        "Exec=%1 new\n"
+        "\n"
+        "[Desktop Action pause-all]\n"
+        "Name=Pause All\n"
+        "Icon=media-playback-pause\n"
+        "Exec=%1 pause --all\n"
+        "\n"
+        "[Desktop Action resume-all]\n"
+        "Name=Resume All\n"
+        "Icon=media-playback-start\n"
+        "Exec=%1 resume --all\n").arg(desktopExecQuote(executablePath));
 
     const bool changed = writeIfChanged(appsDir + QStringLiteral("/orbit.desktop"), entry.toUtf8());
     if (changed) {

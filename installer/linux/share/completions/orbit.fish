@@ -1,6 +1,6 @@
 # fish completions for orbit (Orbit Download Manager)
 
-set -l commands add list ls status pause resume cancel remove rm show feeds config remote help
+set -l commands add list ls status pause resume cancel remove rm show new feeds config remote help
 
 function __orbit_download_ids
     # "ID  STATE ..." rows from `orbit list`; offered as "id<TAB>state  name".
@@ -16,6 +16,7 @@ complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a resume -d 'R
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a cancel -d 'Stop unfinished downloads and delete their partial files'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a remove -d 'Remove downloads from the list'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a show -d 'Open the window'
+complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a new -d 'Open the window to add a download'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a feeds -d 'Torrent RSS feeds'
 complete -c orbit -n '__fish_seen_subcommand_from feeds' -x -a 'add remove check'
 complete -c orbit -n "not __fish_seen_subcommand_from $commands" -a config -d 'Show or change settings'

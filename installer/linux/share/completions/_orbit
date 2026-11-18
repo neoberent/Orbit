@@ -18,6 +18,7 @@ _orbit() {
         'cancel:Stop unfinished downloads and delete their partial files'
         'remove:Remove downloads from the list'
         'show:Open the window'
+        'new:Open the window to add a download'
         'feeds:Torrent RSS feeds'
         'config:Show or change settings'
         'remote:Web dashboard: status, on/off, sign-in'

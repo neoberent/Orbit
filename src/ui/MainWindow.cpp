@@ -248,6 +248,7 @@ MainWindow::MainWindow(orbit::core::DownloadManager& manager, bool portable, QOb
         applyTypeFolders();
         unpackArchives_ = settings.value("after/unpackArchives", false).toBool();
         afterCommand_ = settings.value("after/command").toString();
+        rememberOrigin_ = settings.value("after/rememberOrigin", true).toBool();
     }
 
     aria2_ = new Aria2RpcServer(manager_, [this](const QStringList& links, const QString& directory, QString* error) -> qulonglong {
@@ -566,6 +567,30 @@ void MainWindow::setUnpackArchives(bool enabled) {
     unpackArchives_ = enabled;
     QSettings().setValue("after/unpackArchives", enabled);
     emit afterDownloadChanged();
+}
+
+void MainWindow::setRememberOrigin(bool enabled) {
+    if (enabled == rememberOrigin_) return;
+    rememberOrigin_ = enabled;
+    QSettings().setValue("after/rememberOrigin", enabled);
+    emit afterDownloadChanged();
+}
+
+void MainWindow::tagOrigin(qlonglong id) {
+#if defined(__linux__)
+    if (!rememberOrigin_) return;
+    const auto snap = manager_.snapshot(static_cast<orbit::core::DownloadId>(id));
+    // A torrent is a folder of files from many peers; there is no one link to record.
+    if (!snap || snap->state != orbit::core::DownloadState::Completed || snap->type == orbit::core::DownloadType::Torrent ||
+        snap->destinationPath.empty()) {
+        return;
+    }
+    const QString path = QString::fromStdString(snap->destinationPath);
+    if (!QFileInfo(path).isFile()) return;
+    linux_integration::tagDownloadOrigin(path, QString::fromStdString(snap->source), QString::fromStdString(snap->options.referrer));
+#else
+    Q_UNUSED(id);
+#endif
 }
 
 void MainWindow::setAfterCommand(const QString& command) {
@@ -1183,6 +1208,7 @@ QJsonObject MainWindow::handleControlRequest(const QJsonObject& request) {
     }
     if (type == QLatin1String("show")) {
         emit showWindowRequested();
+        if (request.value("add").toBool()) emit addDialogRequested();
         return QJsonObject{{"ok", true}};
     }
     if (type == QLatin1String("config")) return handleConfigRequest(request);
