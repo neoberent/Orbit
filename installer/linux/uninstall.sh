@@ -58,7 +58,7 @@ fi
 if [ -f "$dest/orbit" ] && [ -f "$dest/orbit-native-host" ]; then
     rm -f "$dest/orbit" "$dest/orbit-native-host" "$dest/License.txt" "$dest/PrivacyPolicy.txt" "$dest/Inter-LICENSE.txt" \
           "$dest/install.sh" "$dest/orbit.png" "$dest"/*.orbit-new "$dest/uninstall.sh"
-    rm -rf "$dest/share/completions" "$dest"/.orbit-update.* "$dest"/.orbit-backup.*
+    rm -rf "$dest/share/completions" "$dest/share/noctalia" "$dest"/.orbit-update.* "$dest"/.orbit-backup.*
     rm -f "$dest/share/orbit.service" "$dest/share/orbit-torrent.desktop" "$dest/share/orbit-links.desktop" \
           "$dest/share/nautilus-download-with-orbit"
     rmdir "$dest/share" 2>/dev/null || true

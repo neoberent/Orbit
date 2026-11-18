@@ -1,0 +1,51 @@
+# Orbit for Noctalia: a bar widget with Orbit's live download status.
+#
+# service -> runs `orbit status --watch --json` once and publishes each line
+#            to the plugin's shared state (key "status")
+# bar     -> draws from that state: progress, speed, ETA in the tooltip;
+#            left click opens Orbit, right click pauses or resumes everything
+#
+# Install from this folder's parent:
+#   noctalia msg plugins source add orbit path <folder holding catalog.toml>
+#   noctalia msg plugins enable neoberent/orbit
+
+id = "neoberent/orbit"
+name = "Orbit"
+version = "1.0.0"
+plugin_api = 51
+author = "neoberent"
+license = "GPL-3.0"
+dependencies = []
+tags = ["download", "utility"]
+icon = "download"
+description = "Live download progress and speed from the Orbit download manager."
+
+# The orbit command, for installs that aren't on PATH.
+[[setting]]
+key = "command"
+type = "string"
+label_key = "settings.command.label"
+description_key = "settings.command.description"
+default = "orbit"
+
+[[service]]
+id = "status"
+entry = "service.luau"
+
+[[widget]]
+id = "bar"
+entry = "bar.luau"
+
+  [[widget.setting]]
+  key = "hide_when_idle"
+  type = "bool"
+  label_key = "settings.hide_when_idle.label"
+  description_key = "settings.hide_when_idle.description"
+  default = true
+
+  [[widget.setting]]
+  key = "show_speed"
+  type = "bool"
+  label_key = "settings.show_speed.label"
+  description_key = "settings.show_speed.description"
+  default = true

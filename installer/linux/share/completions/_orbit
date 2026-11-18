@@ -38,7 +38,8 @@ _orbit() {
                        '*:link or torrent:_files -g "*.torrent"' ;;
         pause|resume|cancel) _arguments '(-a --all)'{-a,--all}'[every download]' '*:download:_orbit_ids' ;;
         remove|rm) _arguments '*:download:_orbit_ids' ;;
-        list|ls|status) _arguments '--json[print JSON]' ;;
+        list|ls) _arguments '--json[print JSON]' ;;
+        status) _arguments '--json[print JSON]' '(-w --watch)'{-w,--watch}'[keep printing a line whenever it changes]' '--interval[seconds between checks with --watch]:seconds:' ;;
         config) _arguments '1:action:(list get set)' '2:setting:(${(f)"$(orbit config list --json 2>/dev/null | sed -n "s/.*\"name\": \"\\([^\"]*\\)\".*/\\1/p")"})' '--json[print JSON]' ;;
         remote) _arguments '1:action:(status enable disable set-password)' '--json[print JSON]' ;;
         feeds) _arguments '1:action:(add remove check)' '--filter[words a title must contain]:words:' '(-d --dir)'{-d,--dir}'[save in this folder]:folder:_directories' '--json[print JSON]' ;;

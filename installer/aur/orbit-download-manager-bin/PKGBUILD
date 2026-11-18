@@ -74,6 +74,12 @@ DESKTOP
         for menu in orbit-torrent orbit-links; do
             sed 's|@ORBIT@|/usr/bin/orbit|g' "share/$menu.desktop" | install -Dm755 /dev/stdin "$pkgdir/usr/share/kio/servicemenus/$menu.desktop"
         done
+        # Noctalia bar widget, a plugin source: noctalia msg plugins source add orbit path /usr/share/orbit/noctalia
+        if [ -d share/noctalia ]; then
+            install -d "$pkgdir/usr/share/orbit"
+            cp -R share/noctalia "$pkgdir/usr/share/orbit/noctalia"
+            find "$pkgdir/usr/share/orbit/noctalia" -type d -exec chmod 755 {} + -o -type f -exec chmod 644 {} +
+        fi
     fi
 
     install -Dm644 License.txt PrivacyPolicy.txt Inter-LICENSE.txt -t "$pkgdir/usr/share/licenses/$pkgname/"

@@ -1208,11 +1208,23 @@ QJsonObject MainWindow::handleControlRequest(const QJsonObject& request) {
         QJsonArray tasks;
         int active = 0, queued = 0, paused = 0, seeding = 0, done = 0, failed = 0;
         double down = 0, up = 0;
-        for (const auto& snap : manager_.snapshot()) {
+        // Overall progress of what is downloading right now (sizes the server told us),
+        // and the fastest of those downloads, for status bars and `orbit status --watch`.
+        std::uint64_t activeDone = 0, activeTotal = 0;
+        const orbit::core::TaskSnapshot* current = nullptr;
+        const auto snapshots = manager_.snapshot();
+        for (const auto& snap : snapshots) {
             tasks.append(controlTaskJson(snap));
             switch (snap.state) {
                 case DownloadState::Downloading:
-                case DownloadState::Connecting: ++active; break;
+                case DownloadState::Connecting:
+                    ++active;
+                    if (snap.stats.totalBytes > 0) {
+                        activeTotal += snap.stats.totalBytes;
+                        activeDone += std::min(snap.stats.bytesDownloaded, snap.stats.totalBytes);
+                    }
+                    if (!current || snap.stats.downloadRateBytesPerSec > current->stats.downloadRateBytesPerSec) current = &snap;
+                    break;
                 case DownloadState::Queued: ++queued; break;
                 case DownloadState::Paused: ++paused; break;
                 case DownloadState::Seeding: ++seeding; break;
@@ -1230,6 +1242,17 @@ QJsonObject MainWindow::handleControlRequest(const QJsonObject& request) {
                           {"completed", done}, {"failed", failed}, {"downloadRate", down}, {"uploadRate", up},
                           {"metered", metered_ && pauseOnMetered_ && !meteredOverridden_},
                           {"networkInterface", networkInterface_}};
+        if (activeTotal > 0) {
+            reply.insert("downloaded", static_cast<double>(activeDone));
+            reply.insert("total", static_cast<double>(activeTotal));
+            reply.insert("progress", static_cast<double>(activeDone) / static_cast<double>(activeTotal));
+            if (down > 0) reply.insert("eta", std::ceil(static_cast<double>(activeTotal - activeDone) / down));
+        }
+        if (current) {
+            reply.insert("current", QJsonObject{{"id", QString::number(static_cast<qulonglong>(current->id))},
+                                                {"name", QString::fromStdString(current->name)},
+                                                {"progress", current->stats.progressRatio()}});
+        }
         if (type == QLatin1String("list")) reply.insert("downloads", tasks);
         return reply;
     }

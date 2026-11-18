@@ -42,8 +42,11 @@ _orbit() {
         remote)
             COMPREPLY=($(compgen -W "status enable disable set-password --json" -- "$cur"))
             ;;
-        list|ls|status)
+        list|ls)
             COMPREPLY=($(compgen -W "--json" -- "$cur"))
+            ;;
+        status)
+            COMPREPLY=($(compgen -W "--json --watch --interval" -- "$cur"))
             ;;
     esac
 }

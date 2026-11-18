@@ -1,0 +1,16 @@
+{
+  "settings": {
+    "command": {
+      "description": "The orbit command; change it when Orbit isn't on your PATH",
+      "label": "Orbit command"
+    },
+    "hide_when_idle": {
+      "description": "Only show the widget while something is downloading, queued or seeding",
+      "label": "Hide when idle"
+    },
+    "show_speed": {
+      "description": "Show the download speed next to the progress on a horizontal bar",
+      "label": "Show speed"
+    }
+  }
+}

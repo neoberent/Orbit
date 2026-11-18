@@ -1,0 +1,17 @@
+# Noctalia plugin source for Orbit. Add this folder as a path source:
+#   noctalia msg plugins source add orbit path <this folder>
+#   noctalia msg plugins enable neoberent/orbit
+# One [[plugin]] row per plugin subdirectory; plugin.toml stays authoritative.
+
+[[plugin]]
+id = "neoberent/orbit"
+name = "Orbit"
+version = "1.0.0"
+updated_at = 1794960000
+added_at = 1794960000
+author = "neoberent"
+license = "GPL-3.0"
+icon = "download"
+description = "Live download progress and speed from the Orbit download manager."
+plugin_api = 51
+tags = ["download", "utility"]

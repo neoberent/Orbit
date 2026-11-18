@@ -38,3 +38,5 @@ complete -c orbit -n '__fish_seen_subcommand_from add' -l mirror -x -d 'Another 
 complete -c orbit -n '__fish_seen_subcommand_from pause resume cancel remove rm' -x -a '(__orbit_download_ids)'
 complete -c orbit -n '__fish_seen_subcommand_from pause resume cancel' -s a -l all -d 'Every download'
 complete -c orbit -n '__fish_seen_subcommand_from add list ls status' -l json -d 'Print JSON'
+complete -c orbit -n '__fish_seen_subcommand_from status' -s w -l watch -d 'Keep printing a line whenever it changes'
+complete -c orbit -n '__fish_seen_subcommand_from status' -l interval -x -d 'Seconds between checks with --watch'

@@ -133,6 +133,13 @@ if [ -d "$extras" ]; then
         chmod 755 "$data/nautilus/scripts/Download with Orbit"
     fi
     if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload >/dev/null 2>&1 || true; fi
+    # The Noctalia bar widget: a plugin source kept next to Orbit. Turning it on changes
+    # the user's shell, so that stays their call (the commands are printed at the end).
+    if [ -d "$extras/noctalia" ] && [ "$(cd "$extras" && pwd)" != "$dest/share" ]; then
+        rm -rf "$dest/share/noctalia"
+        mkdir -p "$dest/share"
+        cp -R "$extras/noctalia" "$dest/share/noctalia"
+    fi
 fi
 
 if ! command -v yt-dlp >/dev/null 2>&1 && [ ! -x "$dest/yt-dlp" ]; then
@@ -142,3 +149,7 @@ fi
 echo "Orbit is installed. Start it from the application menu or run: orbit"
 echo "From a terminal: orbit add <link>, orbit list, orbit help. Headless: systemctl --user enable --now orbit"
 case ":$PATH:" in *":$bindir:"*) ;; *) echo "($bindir is not on your PATH; the menu entry works regardless)";; esac
+if command -v noctalia >/dev/null 2>&1 && [ -d "$dest/share/noctalia" ]; then
+    echo "Noctalia bar widget: noctalia msg plugins source add orbit path \"$dest/share/noctalia\""
+    echo "  then: noctalia msg plugins enable neoberent/orbit, and add a widget with type = \"neoberent/orbit:bar\""
+fi

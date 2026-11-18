@@ -20,8 +20,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
+#include <csignal>
+#include <poll.h>
 #include <termios.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
 
 namespace command_line {
 
@@ -47,6 +52,9 @@ const char* const kUsage =
     "                               some of the connections\n"
     "  list, ls                     Show every download\n"
     "  status                       Show totals and current speeds\n"
+    "      -w, --watch              Keep running and print a line whenever it changes\n"
+    "                               (for status bars; add --json for one object per line)\n"
+    "      --interval <seconds>     How often --watch asks Orbit (default 1)\n"
     "  pause <id>... | --all        Pause downloads\n"
     "  resume <id>... | --all       Resume paused or failed downloads\n"
     "  cancel <id>... | --all       Stop unfinished downloads and delete what they had so far\n"
@@ -208,6 +216,70 @@ void printStatus(const QJsonObject& s) {
     if (s.value("metered").toBool()) printLine(QStringLiteral("Paused while the connection is metered"));
 }
 
+// True once nobody reads our standard output any more (the status bar that started
+// `status --watch` went away). A pipe whose reader closed reports POLLERR.
+bool outputClosed() {
+    pollfd fd{STDOUT_FILENO, 0, 0};
+    return ::poll(&fd, 1, 0) > 0 && (fd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0;
+}
+
+QString watchLine(const QJsonObject& s, bool json) {
+    if (json) return QString::fromUtf8(QJsonDocument(s).toJson(QJsonDocument::Compact));
+    if (!s.value("running").toBool()) return QStringLiteral("Orbit isn't running");
+    QStringList parts;
+    parts << QStringLiteral("↓ %1  ↑ %2").arg(formatRate(s.value("downloadRate").toDouble()), formatRate(s.value("uploadRate").toDouble()));
+    QStringList counts;
+    const std::pair<const char*, const char*> labels[] = {{"active", "downloading"}, {"queued", "queued"}, {"paused", "paused"}, {"seeding", "seeding"}};
+    for (const auto& [key, label] : labels) {
+        const int n = s.value(QLatin1String(key)).toInt();
+        if (n > 0) counts << QStringLiteral("%1 %2").arg(n).arg(QLatin1String(label));
+    }
+    parts << (counts.isEmpty() ? QStringLiteral("idle") : counts.join(QStringLiteral(", ")));
+    if (s.contains("progress")) parts << QStringLiteral("%1%").arg(static_cast<int>(s.value("progress").toDouble() * 100));
+    if (const QString eta = formatEta(s.value("eta").toDouble()); !eta.isEmpty()) parts << eta + QStringLiteral(" left");
+    if (s.value("metered").toBool()) parts << QStringLiteral("paused: metered connection");
+    return parts.join(QStringLiteral("  ·  "));
+}
+
+// `orbit status --watch`: one line each time the status changes, for status bars
+// (Noctalia, Waybar, ...). It never gives up while Orbit is closed, it just reports
+// that and keeps checking, and it ends once its reader is gone.
+int watchStatus(bool json, int intervalMs) {
+#if defined(__linux__)
+    // Also end with the program that started us, even while nothing is being printed.
+    ::prctl(PR_SET_PDEATHSIG, SIGTERM);
+#endif
+    QLocalSocket* socket = nullptr;
+    QString last;
+    while (!outputClosed()) {
+        std::optional<QJsonObject> reply;
+        // Orbit drops a connection after 30 s, so one failed request reconnects once.
+        for (int attempt = 0; attempt < 2 && !reply; ++attempt) {
+            if (!socket) socket = connectToOrbit(0);
+            if (!socket) break;
+            reply = send(socket, QJsonObject{{"type", "status"}});
+            if (!reply) {
+                delete socket;
+                socket = nullptr;
+            }
+        }
+        QJsonObject state{{"running", false}};
+        if (reply) {
+            state = *reply;
+            state.remove("ok");
+            state.insert("running", true);
+        }
+        if (const QString line = watchLine(state, json); line != last) {
+            printLine(line);
+            if (std::fflush(stdout) != 0 || std::ferror(stdout)) break;
+            last = line;
+        }
+        QThread::msleep(static_cast<unsigned long>(reply ? intervalMs : std::max(intervalMs, 2000)));
+    }
+    delete socket;
+    return kExitOk;
+}
+
 // A password from the terminal without echoing it, or one line from a pipe.
 QString readSecret(const char* prompt) {
     const bool tty = ::isatty(STDIN_FILENO);
@@ -257,6 +329,8 @@ int runCommand(const QString& command, const QStringList& args) {
     bool json = false;
     bool all = false;
     bool force = false;
+    bool watch = false;
+    int intervalMs = 1000;
     QString directory;
     QString checksum;
     QString filter;
@@ -267,6 +341,14 @@ int runCommand(const QString& command, const QStringList& args) {
         if (a == QLatin1String("--json")) json = true;
         else if (a == QLatin1String("--all") || a == QLatin1String("-a")) all = true;
         else if (a == QLatin1String("--force") || a == QLatin1String("-f")) force = true;
+        else if (a == QLatin1String("--watch") || a == QLatin1String("-w")) watch = true;
+        else if (a == QLatin1String("--interval")) {
+            bool ok = false;
+            const double seconds = i + 1 < args.size() ? args[i + 1].toDouble(&ok) : 0;
+            if (!ok || seconds < 0.25 || seconds > 60) { printError(QStringLiteral("--interval needs seconds between 0.25 and 60")); return kExitUsage; }
+            intervalMs = static_cast<int>(seconds * 1000);
+            ++i;
+        }
         else if (a == QLatin1String("-d") || a == QLatin1String("--dir")) {
             if (i + 1 >= args.size()) { printError(QStringLiteral("%1 needs a folder").arg(a)); return kExitUsage; }
             directory = QFileInfo(args[++i]).absoluteFilePath();
@@ -300,6 +382,11 @@ int runCommand(const QString& command, const QStringList& args) {
             printError(QStringLiteral("unknown option %1 (see orbit help)").arg(a));
             return kExitUsage;
         } else positional << a;
+    }
+
+    if (watch) {
+        if (command != QLatin1String("status")) { printError(QStringLiteral("--watch only works with status")); return kExitUsage; }
+        return watchStatus(json, intervalMs);
     }
 
     const bool isAdd = command == QLatin1String("add");
