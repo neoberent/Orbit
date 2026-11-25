@@ -24,6 +24,7 @@
   <url type="vcs-browser">https://github.com/neoberent/Orbit</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="3.2.1" date="2026-11-25"/>
     <release version="3.2.0" date="2026-11-15"/>
   </releases>
 </component>
