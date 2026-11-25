@@ -1,6 +1,6 @@
 pkgbase = orbit-download-manager-bin
 	pkgdesc = Multi-connection HTTP, BitTorrent and video download manager (Qt 6)
-	pkgver = 3.2.0
+	pkgver = 3.2.1
 	pkgrel = 1
 	url = https://github.com/neoberent/Orbit
 	install = orbit-download-manager.install
@@ -28,7 +28,7 @@ pkgbase = orbit-download-manager-bin
 	conflicts = orbit-bin
 	options = !strip
 	options = !debug
-	source = https://github.com/neoberent/Orbit-release/releases/download/Release3.2.0/OrbitSetup-3.2.0-linux.tar.gz
-	sha256sums = 9a0ca608796fc9fde4013653efa4e09b4075d6b2371088595f2812257d78344a
+	source = https://github.com/neoberent/Orbit-release/releases/download/Release3.2.1/OrbitSetup-3.2.1-linux.tar.gz
+	sha256sums = ae78c75dccc17cccf467beb7eadfc52a347f91cf7f70dd6e6c90640bf2268da7
 
 pkgname = orbit-download-manager-bin
