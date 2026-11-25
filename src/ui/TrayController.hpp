@@ -33,6 +33,8 @@ public:
     Q_INVOKABLE void notifyTransfer(qlonglong id, const QString& title, const QString& message, bool success);
     // Downloads were paused because the connection is metered; offers to continue anyway.
     void notifyMetered(int count);
+    // A finished download is the same file as originalPath: offers to trash the new copy.
+    void notifyDuplicate(qlonglong id, const QString& name, const QString& originalPath);
     // Offers copied links as a notification with Download and Review buttons (used where
     // Orbit can't place its own prompt by the tray, i.e. under Wayland). False when the
     // desktop has no notification server with buttons; the caller shows its prompt then.

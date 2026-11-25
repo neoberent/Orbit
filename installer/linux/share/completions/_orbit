@@ -36,7 +36,7 @@ _orbit() {
                        '--checksum[verify when finished]:checksum:' '--json[print JSON]' \
                        '(-f --force)'{-f,--force}'[add even if downloaded before]' \
                        '*--mirror[another link to the same file]:link:' \
-                       '*:link or torrent:_files -g "*.torrent"' ;;
+                       '*:link or file:_files -g "*.(torrent|meta4|metalink)"' ;;
         pause|resume|cancel) _arguments '(-a --all)'{-a,--all}'[every download]' '*:download:_orbit_ids' ;;
         remove|rm) _arguments '*:download:_orbit_ids' ;;
         list|ls) _arguments '--json[print JSON]' ;;

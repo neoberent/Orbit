@@ -98,6 +98,17 @@ class MainWindow final : public QObject {
     Q_PROPERTY(QString afterCommand READ afterCommand WRITE setAfterCommand NOTIFY afterDownloadChanged)
     // Record each finished file's link and page as xattrs (Linux; file managers show them).
     Q_PROPERTY(bool rememberOrigin READ rememberOrigin WRITE setRememberOrigin NOTIFY afterDownloadChanged)
+    // Scan finished downloads with ClamAV; a threat stops the after-download actions.
+    Q_PROPERTY(bool scanDownloads READ scanDownloads WRITE setScanDownloads NOTIFY afterDownloadChanged)
+    Q_PROPERTY(bool clamavAvailable READ clamavAvailable CONSTANT)
+    // Check the .asc/.sig/.minisig a publisher puts beside a release file.
+    Q_PROPERTY(bool checkSignatures READ checkSignatures WRITE setCheckSignatures NOTIFY afterDownloadChanged)
+    // minisign public keys ("RW...") trusted for .minisig files, separated by spaces.
+    Q_PROPERTY(QString minisignKeys READ minisignKeys WRITE setMinisignKeys NOTIFY afterDownloadChanged)
+    // Say when a finished file is the same as one already downloaded or in its folder.
+    Q_PROPERTY(bool spotDuplicates READ spotDuplicates WRITE setSpotDuplicates NOTIFY afterDownloadChanged)
+    // Changes whenever a check result changes (for bindings on fileChecksFor()).
+    Q_PROPERTY(int fileCheckRevision READ fileCheckRevision NOTIFY fileChecksChanged)
 
     // The network interface every download is bound to ("" = any), e.g. a VPN's wg0.
     Q_PROPERTY(QString networkInterface READ networkInterface WRITE setNetworkInterface NOTIFY networkInterfaceChanged)
@@ -260,6 +271,30 @@ public:
     void tagOrigin(qlonglong id);
     // Runs the after-download actions for a download that just finished.
     void runAfterDownload(qlonglong id);
+    // A download finished: records its origin, runs the checks (virus scan, signature,
+    // duplicates), then the after-download actions unless a check found a problem.
+    void downloadFinished(qlonglong id);
+
+    [[nodiscard]] bool scanDownloads() const noexcept { return scanDownloads_; }
+    void setScanDownloads(bool enabled);
+    [[nodiscard]] bool clamavAvailable() const;
+    [[nodiscard]] bool checkSignatures() const noexcept { return checkSignatures_; }
+    void setCheckSignatures(bool enabled);
+    [[nodiscard]] QString minisignKeys() const { return minisignKeys_; }
+    void setMinisignKeys(const QString& keys);
+    [[nodiscard]] bool spotDuplicates() const noexcept { return spotDuplicates_; }
+    void setSpotDuplicates(bool enabled);
+    [[nodiscard]] int fileCheckRevision() const;
+    // What the checks found for a download (see FileChecks::resultFor).
+    Q_INVOKABLE QVariantMap fileChecksFor(qlonglong id) const;
+    // Moves a download found to be a duplicate to the trash and drops it from the list.
+    Q_INVOKABLE QString trashDuplicate(qlonglong id);
+
+    // Adds every file of a Metalink (.meta4 / .metalink): a local file, or an http(s)
+    // link that's fetched first. Returns an error, or an empty string once it's on its
+    // way; metalinkAdded() follows with the result.
+    Q_INVOKABLE QString addMetalink(const QString& source, const QString& directory);
+    Q_INVOKABLE bool isMetalink(const QString& source) const;
 
     // Without a window nobody can answer a question, so .torrent files open from outside
     // start with every file, and a file name that's taken gets a new name.
@@ -373,6 +408,11 @@ signals:
     void aria2Changed();
     // An after-download action finished: ok, and a message for the user.
     void afterDownloadNotice(const QString& title, const QString& message, bool ok);
+    void fileChecksChanged();
+    // A finished file is byte for byte the same as originalPath.
+    void duplicateFound(qlonglong id, const QString& name, const QString& originalPath);
+    // A Metalink's files were added (count), or it couldn't be read (error).
+    void metalinkAdded(int count, const QString& error);
     // count downloads were paused because the connection became metered.
     void meteredPaused(int count);
     void showWindowRequested();
@@ -390,6 +430,9 @@ private:
     void watchMeteredPauses();
     void retryAfterReconnect();
     orbit::core::DownloadId addLink(const QString& link, orbit::core::DownloadRequest request);
+    // Adds the files of a parsed Metalink; returns their ids (empty with *error set).
+    std::vector<orbit::core::DownloadId> addMetalinkData(const QByteArray& xml, const QString& directory, QString* error);
+    void applyFileCheckSettings();
     // Hands an incoming link to a running Refresh Link capture. False when none is running.
     bool offerToLinkCapture(const QString& url, const orbit::core::DownloadRequest& context);
     [[nodiscard]] orbit::core::DownloadRequest captureContextFor(const QString& url) const;
@@ -460,6 +503,11 @@ private:
     QVariantMap typeFolders_;
     bool unpackArchives_{false};
     bool rememberOrigin_{true};
+    bool scanDownloads_{false};
+    bool checkSignatures_{true};
+    bool spotDuplicates_{true};
+    QString minisignKeys_;
+    class FileChecks* fileChecks_{nullptr};
     QString afterCommand_;
     QString networkInterface_;
     bool pauseOnMetered_{true};

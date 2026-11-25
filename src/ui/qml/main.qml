@@ -116,6 +116,12 @@ ApplicationWindow {
             } else if (action === "retry") {
                 if (item.stateLabel === "Error" || item.stateLabel === "Cancelled" || item.isPaused)
                     downloadModel.resumeItem(id)
+            } else if (action === "trashcopy") {
+                const error = appController.trashDuplicate(id)
+                if (error.length > 0) trayController.notify("Couldn't move it to the trash", error, true)
+            } else if (action === "revealoriginal") {
+                const original = appController.fileChecksFor(id).duplicateOf
+                if (original) appController.revealFile(original)
             }
         }
     }

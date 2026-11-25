@@ -262,6 +262,16 @@ QJsonValue Aria2RpcServer::dispatch(const QString& method, QJsonArray params, QS
         if (newId == 0) { *error = addError; return {}; }
         return gidOf(newId);
     }
+    if (method == QLatin1String("aria2.addMetalink") && addMetalink_) {
+        const QByteArray xml = QByteArray::fromBase64(param(0).toString().toLatin1());
+        if (xml.isEmpty()) { *error = QStringLiteral("No Metalink to read"); return {}; }
+        QString addError;
+        const QList<qulonglong> ids = addMetalink_(xml, option(1, "dir"), &addError);
+        if (ids.isEmpty()) { *error = addError.isEmpty() ? QStringLiteral("Couldn't add it") : addError; return {}; }
+        QJsonArray gids;
+        for (const qulonglong id : ids) gids.append(gidOf(id));
+        return gids;
+    }
     if (method == QLatin1String("aria2.tellStatus")) {
         qulonglong id = 0;
         if (!requireId(&id)) return {};
@@ -355,7 +365,7 @@ QJsonValue Aria2RpcServer::dispatch(const QString& method, QJsonArray params, QS
         return QStringLiteral("OK");  // Orbit's own settings stay in charge.
     }
     if (method == QLatin1String("system.listMethods")) {
-        return QJsonArray{"aria2.addUri", "aria2.addTorrent", "aria2.tellStatus", "aria2.tellActive", "aria2.tellWaiting",
+        return QJsonArray{"aria2.addUri", "aria2.addTorrent", "aria2.addMetalink", "aria2.tellStatus", "aria2.tellActive", "aria2.tellWaiting",
                           "aria2.tellStopped", "aria2.pause", "aria2.forcePause", "aria2.unpause", "aria2.remove",
                           "aria2.forceRemove", "aria2.removeDownloadResult", "aria2.purgeDownloadResult", "aria2.pauseAll",
                           "aria2.forcePauseAll", "aria2.unpauseAll", "aria2.getGlobalStat", "aria2.getVersion",

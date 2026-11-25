@@ -93,8 +93,10 @@ QString extractPendingProtocolUrl(int argc, char* argv[]) {
         QString argQ = QString::fromStdString(arg);
         // Linux desktops may hand an opened file over as a file:// URL.
         if (argQ.startsWith(QLatin1String("file://"), Qt::CaseInsensitive)) argQ = QUrl(argQ).toLocalFile();
-        if (argQ.endsWith(QStringLiteral(".torrent"), Qt::CaseInsensitive)) {
-            return argQ;
+        if (argQ.endsWith(QStringLiteral(".torrent"), Qt::CaseInsensitive) || argQ.endsWith(QStringLiteral(".meta4"), Qt::CaseInsensitive) ||
+            argQ.endsWith(QStringLiteral(".metalink"), Qt::CaseInsensitive)) {
+            // Relative paths come from a terminal; the running Orbit has another folder.
+            return QFileInfo(argQ).absoluteFilePath();
         }
     }
     return {};
@@ -351,16 +353,23 @@ int main(int argc, char* argv[]) {
     // After-download actions run here, in C++, so they work headless too.
     QObject::connect(&downloadModel, &DownloadListModel::transferFinished, &controller,
                      [&controller](qlonglong id, const QString&, bool success, const QString&) {
-                         if (success) {
-                             controller.tagOrigin(id);  // before any command sees the file
-                             controller.runAfterDownload(id);
-                         }
+                         if (success) controller.downloadFinished(id);
                          controller.retryIfWorthIt(id);  // also forgets the tries of one that finished
                      });
     QObject::connect(&controller, &MainWindow::afterDownloadNotice, &trayController,
                      [&trayController](const QString& title, const QString& message, bool ok) {
                          trayController.notify(title, message, !ok);
                      });
+    QObject::connect(&controller, &MainWindow::duplicateFound, &trayController,
+                     [&trayController](qlonglong id, const QString& name, const QString& original) {
+                         trayController.notifyDuplicate(id, name, original);
+                     });
+    QObject::connect(&controller, &MainWindow::metalinkAdded, &trayController, [&trayController](int count, const QString&) {
+        if (count > 0) {
+            trayController.notify(QStringLiteral("Metalink added"),
+                                  count == 1 ? QStringLiteral("1 download") : QStringLiteral("%1 downloads").arg(count), false);
+        }
+    });
     QObject::connect(&controller, &MainWindow::meteredPaused, &trayController, [&trayController](int count) {
         trayController.notifyMetered(count);
     });

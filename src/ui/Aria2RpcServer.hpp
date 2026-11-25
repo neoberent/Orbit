@@ -33,6 +33,10 @@ public:
     using AddLink = std::function<qulonglong(const QStringList& links, const QString& directory, QString* error)>;
 
     Aria2RpcServer(orbit::core::DownloadManager& manager, AddLink addLink, QObject* parent = nullptr);
+    // Adds every file of a Metalink document (aria2.addMetalink), returning their ids, or
+    // none with an error.
+    using AddMetalink = std::function<QList<qulonglong>(const QByteArray& xml, const QString& directory, QString* error)>;
+    void setAddMetalink(AddMetalink addMetalink) { addMetalink_ = std::move(addMetalink); }
     ~Aria2RpcServer() override;
 
     // Returns an error message, or an empty string once it listens.
@@ -53,6 +57,7 @@ private:
 
     orbit::core::DownloadManager& manager_;
     AddLink addLink_;
+    AddMetalink addMetalink_;
     QTcpServer* server_{nullptr};
     quint16 port_{0};
     QString secret_;

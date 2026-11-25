@@ -71,6 +71,30 @@ Rectangle {
         }
     }
 
+    function scanText(checks) {
+        switch (checks.scan) {
+        case "clean": return "No threats found"
+        case "infected": return "Threat: " + checks.threat
+        case "scanning": return "Scanning…"
+        case "skipped": return "Too big to scan"
+        case "unavailable": return "ClamAV isn't installed"
+        default: return "Couldn't scan"
+        }
+    }
+
+    function signatureText(checks) {
+        const key = checks.keyId ? " (" + checks.keyId.slice(-8) + ")" : ""
+        switch (checks.signature) {
+        case "good": return "Verified" + (checks.signer ? " · " + checks.signer : "")
+        case "bad": return "Doesn't match the file"
+        case "unknown-key": return "Signed by a key you don't have" + key
+        case "revoked": return "Signed with a revoked key" + key
+        case "expired": return "Good, but the key has expired" + key
+        case "checking": return "Checking…"
+        default: return "Couldn't check" + (checks.signatureDetail ? ": " + checks.signatureDetail : "")
+        }
+    }
+
     readonly property var stats: {
         if (multi) {
             let total = 0, done = 0, rate = 0, active = 0, paused = 0, finishedCount = 0, failedCount = 0
@@ -113,6 +137,12 @@ Rectangle {
         if (item.isTorrent && item.uploadLimitKBps > 0) list.push({ label: "Upload limit", value: item.uploadLimitKBps + " KB/s" })
         if (item.scheduledText && item.scheduledText.length > 0) list.push({ label: "Starts", value: item.scheduledText })
         if (item.checksumState && item.checksumState.length > 0) list.push({ label: "Checksum", value: checksumText(item.checksumState), tone: item.checksumState })
+        // Virus scan, publisher signature and duplicate results (re-read when they change).
+        const checks = appController.fileCheckRevision >= 0 ? appController.fileChecksFor(item.taskId) : ({})
+        if (checks.scan) list.push({ label: "Virus scan", value: scanText(checks), tone: checks.scan === "clean" ? "match" : checks.scan === "infected" ? "mismatch" : "" })
+        if (checks.signature) list.push({ label: "Signature", value: signatureText(checks),
+                                          tone: checks.signature === "good" ? "match" : (checks.signature === "bad" || checks.signature === "revoked") ? "mismatch" : "" })
+        if (checks.duplicateOf) list.push({ label: "Same as", value: checks.duplicateOf.split("/").pop() })
         if (item.hasBrowserSession) list.push({ label: "Sign-in", value: "Browser session" })
         if (item.addedText && item.addedText.length > 0) list.push({ label: "Added", value: item.addedText })
         if (item.dateText && item.dateText.length > 0) list.push({ label: "Finished", value: item.dateText })

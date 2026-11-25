@@ -43,7 +43,8 @@ const char* const kUsage =
     "Without a command, Orbit opens its window (or brings it to the front).\n"
     "\n"
     "Commands:\n"
-    "  add <link|file.torrent>...   Add downloads (http(s) links, magnet links, .torrent files)\n"
+    "  add <link|file>...           Add downloads (http(s) links, magnet links, .torrent and\n"
+    "                               Metalink (.meta4) files)\n"
     "      -d, --dir <folder>       Save them in this folder instead of the default one\n"
     "      -i, --input <file>       Also add every link in this file, one per line (- = stdin)\n"
     "      --checksum <type:hex>    Verify the file when it finishes (sha256:..., md5:...)\n"
@@ -319,7 +320,10 @@ void printRemoteStatus(const QJsonObject& s) {
 QString absoluteSource(const QString& arg) {
     QString source = arg;
     if (source.startsWith(QLatin1String("file://"), Qt::CaseInsensitive)) source = QUrl(source).toLocalFile();
-    if (source.endsWith(QLatin1String(".torrent"), Qt::CaseInsensitive) && !source.contains(QLatin1String("://")) &&
+    const bool localFile = source.endsWith(QLatin1String(".torrent"), Qt::CaseInsensitive) ||
+                           source.endsWith(QLatin1String(".meta4"), Qt::CaseInsensitive) ||
+                           source.endsWith(QLatin1String(".metalink"), Qt::CaseInsensitive);
+    if (localFile && !source.contains(QLatin1String("://")) &&
         !source.startsWith(QLatin1String("magnet:"), Qt::CaseInsensitive)) {
         return QFileInfo(source).absoluteFilePath();
     }
@@ -446,11 +450,19 @@ int runCommand(const QString& command, const QStringList& args) {
                 exitCode = kExitFailed;
                 continue;
             }
-            const QJsonObject d = reply->value("download").toObject();
-            added.append(d);
-            if (!json) {
-                const QString name = d.value("name").toString();
-                printLine(QStringLiteral("Added %1  %2").arg(d.value("id").toString(), name.isEmpty() ? arg : name));
+            if (reply->value("pending").toBool()) {  // a Metalink link, read in the background
+                if (!json) printLine(arg + QStringLiteral(": ") + reply->value("message").toString());
+                continue;
+            }
+            QJsonArray downloads = reply->value("downloads").toArray();  // a Metalink's files
+            if (downloads.isEmpty()) downloads.append(reply->value("download").toObject());
+            for (const QJsonValue& value : downloads) {
+                const QJsonObject d = value.toObject();
+                added.append(d);
+                if (!json) {
+                    const QString name = d.value("name").toString();
+                    printLine(QStringLiteral("Added %1  %2").arg(d.value("id").toString(), name.isEmpty() ? arg : name));
+                }
             }
         }
         if (json) printLine(QString::fromUtf8(QJsonDocument(added).toJson(QJsonDocument::Indented)).trimmed());

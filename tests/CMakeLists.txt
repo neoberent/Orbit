@@ -25,5 +25,8 @@ orbit_add_test(tst_remoteserver orbit_services)
 orbit_add_test(tst_ui orbit_services)
 target_sources(tst_ui PRIVATE
     ${PROJECT_SOURCE_DIR}/src/ui/Aria2RpcServer.cpp ${PROJECT_SOURCE_DIR}/src/ui/Aria2RpcServer.hpp
-    ${PROJECT_SOURCE_DIR}/src/ui/FeedWatcher.cpp ${PROJECT_SOURCE_DIR}/src/ui/FeedWatcher.hpp)
+    ${PROJECT_SOURCE_DIR}/src/ui/FeedWatcher.cpp ${PROJECT_SOURCE_DIR}/src/ui/FeedWatcher.hpp
+    ${PROJECT_SOURCE_DIR}/src/ui/Metalink.cpp ${PROJECT_SOURCE_DIR}/src/ui/Metalink.hpp
+    ${PROJECT_SOURCE_DIR}/src/ui/SignatureCheck.cpp ${PROJECT_SOURCE_DIR}/src/ui/SignatureCheck.hpp
+    ${PROJECT_SOURCE_DIR}/src/ui/FileChecks.cpp ${PROJECT_SOURCE_DIR}/src/ui/FileChecks.hpp)
 target_include_directories(tst_ui PRIVATE ${PROJECT_SOURCE_DIR}/src/ui)

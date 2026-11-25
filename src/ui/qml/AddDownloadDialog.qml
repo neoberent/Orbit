@@ -250,7 +250,13 @@ Dialog {
         }
         const startAt = startLater ? nextOccurrence(startTimeField.text) : 0
 
-        if (isTorrentSource(source)) {
+        if (appController.isMetalink(source)) {
+            const error = appController.addMetalink(source, destField.text)
+            if (error.length > 0) {
+                errorMessage = error
+                return
+            }
+        } else if (isTorrentSource(source)) {
             const excluded = []
             for (let i = 0; i < torrentFilesModelInstance.count; i++) {
                 const item = torrentFilesModelInstance.get(i)
@@ -299,6 +305,7 @@ Dialog {
         if (text.length === 0) return ""
         if (isMagnet(text)) return "Magnet link"
         if (text.toLowerCase().endsWith(".torrent")) return "Torrent file"
+        if (appController.isMetalink(text)) return "Metalink"
         if (root.sourceIsMedia) return "Media page"
         return "Direct download"
     }
@@ -308,6 +315,7 @@ Dialog {
 
     readonly property string footerSummary: {
         if (sourceText.length === 0) return ""
+        if (appController.isMetalink(sourceText)) return "Each file is added with its mirrors and checksum"
         if (torrentSource) {
             if (torrentFilesModelInstance.count > 0)
                 return selectedFilesCount + " of " + torrentFilesModelInstance.count + " files  ·  " + formatBytes(selectedFilesSize)

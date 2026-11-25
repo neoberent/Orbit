@@ -65,6 +65,16 @@ private:
         const QList<QByteArray> requestLine = lines.value(0).trimmed().split(' ');
         const bool isHead = requestLine.value(0) == "HEAD";
 
+        const QByteArray path = requestLine.value(1);
+        if (b.files.contains(path) || (!b.payloadPath.isEmpty() && path != b.payloadPath)) {
+            const bool found = b.files.contains(path);
+            const QByteArray body = found ? b.files.value(path) : QByteArray();
+            socket->write((found ? "HTTP/1.1 200 OK\r\n" : "HTTP/1.1 404 Not Found\r\n") + QByteArray("Content-Length: ") +
+                          QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + (isHead ? QByteArray() : body));
+            socket->disconnectFromHost();
+            return;
+        }
+
         if (b.status != 0) {
             socket->write("HTTP/1.1 " + QByteArray::number(b.status) + " Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             socket->disconnectFromHost();

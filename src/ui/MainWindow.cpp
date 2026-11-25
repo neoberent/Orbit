@@ -3,6 +3,9 @@
 #include "BrowserIntegration.hpp"
 #include "FeedWatcher.hpp"
 #include "Aria2RpcServer.hpp"
+#include "FileChecks.hpp"
+#include "Metalink.hpp"
+#include "SignatureCheck.hpp"
 #include "core/ProtocolHandler.hpp"
 #include "core/RemoteServer.hpp"
 #include "core/Scheduler.hpp"
@@ -249,7 +252,16 @@ MainWindow::MainWindow(orbit::core::DownloadManager& manager, bool portable, QOb
         unpackArchives_ = settings.value("after/unpackArchives", false).toBool();
         afterCommand_ = settings.value("after/command").toString();
         rememberOrigin_ = settings.value("after/rememberOrigin", true).toBool();
+        scanDownloads_ = settings.value("after/scanDownloads", false).toBool();
+        checkSignatures_ = settings.value("after/checkSignatures", true).toBool();
+        spotDuplicates_ = settings.value("after/spotDuplicates", true).toBool();
+        minisignKeys_ = signature_check::parseMinisignKeys(settings.value("after/minisignKeys").toString()).join(QLatin1Char(' '));
     }
+    fileChecks_ = new FileChecks(manager_, this);
+    applyFileCheckSettings();
+    connect(fileChecks_, &FileChecks::changed, this, &MainWindow::fileChecksChanged);
+    connect(fileChecks_, &FileChecks::notice, this, &MainWindow::afterDownloadNotice);
+    connect(fileChecks_, &FileChecks::duplicateFound, this, &MainWindow::duplicateFound);
 
     aria2_ = new Aria2RpcServer(manager_, [this](const QStringList& links, const QString& directory, QString* error) -> qulonglong {
         const QString link = links.value(0);
@@ -277,6 +289,15 @@ MainWindow::MainWindow(orbit::core::DownloadManager& manager, bool portable, QOb
         ORBIT_LOG_INFO("aria2", "Added a download through the aria2 interface");
         return static_cast<qulonglong>(addLink(link, std::move(request)));
     }, this);
+    aria2_->setAddMetalink([this](const QByteArray& xml, const QString& directory, QString* error) {
+        QList<qulonglong> ids;
+        if (!directory.isEmpty() && (!QDir::isAbsolutePath(directory) || !QDir().mkpath(directory))) {
+            *error = QStringLiteral("The folder must be an absolute path");
+            return ids;
+        }
+        for (const auto id : addMetalinkData(xml, directory, error)) ids << static_cast<qulonglong>(id);
+        return ids;
+    });
     aria2Enabled_ = settings.value("aria2/enabled", false).toBool();
     aria2Port_ = std::clamp(settings.value("aria2/port", 6800).toInt(), 1024, 65535);
     aria2Secret_ = unprotectSecret(settings.value("aria2/secret").toString());
@@ -574,6 +595,142 @@ void MainWindow::setRememberOrigin(bool enabled) {
     rememberOrigin_ = enabled;
     QSettings().setValue("after/rememberOrigin", enabled);
     emit afterDownloadChanged();
+}
+
+void MainWindow::applyFileCheckSettings() {
+    FileChecks::Settings checks;
+    checks.scan = scanDownloads_;
+    checks.signatures = checkSignatures_;
+    checks.duplicates = spotDuplicates_;
+    checks.minisignKeys = signature_check::parseMinisignKeys(minisignKeys_);
+    fileChecks_->setSettings(checks);
+}
+
+void MainWindow::setScanDownloads(bool enabled) {
+    if (enabled == scanDownloads_) return;
+    scanDownloads_ = enabled;
+    QSettings().setValue("after/scanDownloads", enabled);
+    applyFileCheckSettings();
+    emit afterDownloadChanged();
+}
+
+bool MainWindow::clamavAvailable() const { return FileChecks::clamavAvailable(); }
+
+void MainWindow::setCheckSignatures(bool enabled) {
+    if (enabled == checkSignatures_) return;
+    checkSignatures_ = enabled;
+    QSettings().setValue("after/checkSignatures", enabled);
+    applyFileCheckSettings();
+    emit afterDownloadChanged();
+}
+
+void MainWindow::setMinisignKeys(const QString& keys) {
+    // Only well-formed keys are kept, one space apart.
+    const QString cleaned = signature_check::parseMinisignKeys(keys).join(QLatin1Char(' '));
+    if (cleaned == minisignKeys_) {
+        if (keys != cleaned) emit afterDownloadChanged();  // shows the field what was kept
+        return;
+    }
+    minisignKeys_ = cleaned;
+    QSettings().setValue("after/minisignKeys", cleaned);
+    applyFileCheckSettings();
+    emit afterDownloadChanged();
+}
+
+void MainWindow::setSpotDuplicates(bool enabled) {
+    if (enabled == spotDuplicates_) return;
+    spotDuplicates_ = enabled;
+    QSettings().setValue("after/spotDuplicates", enabled);
+    applyFileCheckSettings();
+    emit afterDownloadChanged();
+}
+
+int MainWindow::fileCheckRevision() const { return fileChecks_->revision(); }
+
+QVariantMap MainWindow::fileChecksFor(qlonglong id) const { return fileChecks_->resultFor(id); }
+
+QString MainWindow::trashDuplicate(qlonglong id) {
+    const auto snap = manager_.snapshot(static_cast<orbit::core::DownloadId>(id));
+    if (!snap) return QStringLiteral("This download no longer exists");
+    const QString original = fileChecks_->resultFor(id).value(QStringLiteral("duplicateOf")).toString();
+    const QString path = QString::fromStdString(snap->destinationPath);
+    // Only while both copies are still there: the trash must never take the last one.
+    if (original.isEmpty() || !QFileInfo(original).isFile()) return QStringLiteral("The other copy isn't there any more");
+    if (!QFileInfo(path).isFile()) return QStringLiteral("The file isn't there any more");
+    if (!QFile::moveToTrash(path)) return QStringLiteral("Couldn't move it to the trash");
+    manager_.remove(snap->id, false);
+    ORBIT_LOG_INFO("checks", "Moved duplicate download " + std::to_string(id) + " to the trash");
+    return {};
+}
+
+void MainWindow::downloadFinished(qlonglong id) {
+    tagOrigin(id);  // before any command sees the file
+    fileChecks_->check(id, [this, id](bool proceed) {
+        if (proceed) {
+            runAfterDownload(id);
+        } else {
+            ORBIT_LOG_INFO("after", "Skipped the after-download actions for download " + std::to_string(id) + " (a check found a problem)");
+        }
+    });
+}
+
+bool MainWindow::isMetalink(const QString& source) const { return metalink::looksLikeMetalink(source); }
+
+std::vector<orbit::core::DownloadId> MainWindow::addMetalinkData(const QByteArray& xml, const QString& directory, QString* error) {
+    std::vector<orbit::core::DownloadId> ids;
+    const metalink::Result parsed = metalink::parse(xml);
+    if (parsed.files.isEmpty()) {
+        if (error) *error = parsed.error;
+        return ids;
+    }
+    for (const metalink::File& file : parsed.files) {
+        orbit::core::DownloadRequest request;
+        if (!directory.isEmpty()) request.destinationDir = QDir::cleanPath(directory).toStdString();
+        request.suggestedName = file.name.toStdString();
+        request.expectedChecksum = file.checksum.toStdString();
+        for (const QString& mirror : file.urls.mid(1)) request.mirrors.push_back(mirror.toStdString());
+        request.source = file.urls.first().toStdString();
+        if (request.destinationDir.empty()) request.destinationDir = manager_.defaultDownloadDir().string();
+        request.maxConnections = maxConnectionsPerDownload_;
+        // Always a plain HTTP download: the Metalink named the file, not a media page.
+        const auto id = manager_.addHttpDownload(std::move(request));
+        if (id != 0) ids.push_back(id);
+    }
+    ORBIT_LOG_INFO("metalink", "Added " + std::to_string(ids.size()) + " downloads from a Metalink");
+    if (ids.empty() && error) *error = QStringLiteral("Orbit couldn't add its files");
+    return ids;
+}
+
+QString MainWindow::addMetalink(const QString& rawSource, const QString& directory) {
+    QString source = rawSource.trimmed();
+    if (source.startsWith(QLatin1String("file://"), Qt::CaseInsensitive)) source = QUrl(source).toLocalFile();
+    if (!directory.isEmpty() && (!QDir::isAbsolutePath(directory) || !QDir().mkpath(directory))) {
+        return QStringLiteral("The folder must be an absolute path");
+    }
+    if (isHttpUrl(source)) {
+        QPointer<MainWindow> guard(this);
+        manager_.fetchSmall(source.toStdString(), static_cast<std::size_t>(metalink::kMaxBytes),
+                            [guard, directory](bool ok, const std::string& body, const std::string& fetchError) {
+            QMetaObject::invokeMethod(QCoreApplication::instance(), [guard, directory, ok, body = QByteArray::fromStdString(body),
+                                                                     fetchError = QString::fromStdString(fetchError)] {
+                if (!guard) return;
+                QString error = ok ? QString() : QStringLiteral("Couldn't fetch the Metalink: ") + fetchError;
+                const auto ids = ok ? guard->addMetalinkData(body, directory, &error) : std::vector<orbit::core::DownloadId>{};
+                emit guard->metalinkAdded(static_cast<int>(ids.size()), ids.empty() ? error : QString());
+                if (ids.empty()) emit guard->afterDownloadNotice(QStringLiteral("Couldn't add the Metalink"), error, false);
+            }, Qt::QueuedConnection);
+        });
+        return {};
+    }
+    if (!QDir::isAbsolutePath(source) || !metalink::looksLikeMetalink(source)) return QStringLiteral("That isn't a Metalink file");
+    QFile file(source);
+    if (file.size() > metalink::kMaxBytes) return QStringLiteral("That's too big to be a Metalink file");
+    if (!file.open(QIODevice::ReadOnly)) return QStringLiteral("Couldn't open ") + source;
+    QString error;
+    const auto ids = addMetalinkData(file.readAll(), directory, &error);
+    if (ids.empty()) return error;
+    emit metalinkAdded(static_cast<int>(ids.size()), {});
+    return {};
 }
 
 void MainWindow::tagOrigin(qlonglong id) {
@@ -1068,6 +1225,18 @@ QString MainWindow::addFromExternalSource(const QString& source) {
     const bool isMagnet = orbit::utils::isMagnetUri(trimmed.toStdString());
     const bool isTorrentFile = !isMagnet && !isHttpUrl(trimmed) && trimmed.endsWith(QStringLiteral(".torrent"), Qt::CaseInsensitive);
 
+    // A local Metalink the user opened with Orbit (a web page can't hand over local
+    // paths: main.cpp drops them from orbit:// launches). A Metalink link from a page is
+    // downloaded like any other file.
+    if (!isHttpUrl(trimmed) && !isMagnet && metalink::looksLikeMetalink(trimmed) && QDir::isAbsolutePath(trimmed)) {
+        const QString error = addMetalink(trimmed, {});
+        if (!error.isEmpty()) {
+            emit afterDownloadNotice(QStringLiteral("Couldn't add the Metalink"), error, false);
+            return QString();
+        }
+        return trimmed;
+    }
+
     // Sources reaching this point can come from untrusted places (the orbit:// protocol
     // handler, drag-and-drop, command-line args), so only ever forward a magnet URI, a
     // local .torrent path, or an http(s) URL — never something like file:// or ftp://.
@@ -1159,7 +1328,7 @@ bool isTransferring(orbit::core::DownloadState state) {
     return state == DownloadState::Downloading || state == DownloadState::Connecting || state == DownloadState::Seeding;
 }
 
-QJsonObject controlTaskJson(const orbit::core::TaskSnapshot& snap) {
+QJsonObject controlTaskJson(const orbit::core::TaskSnapshot& snap, const QVariantMap& checks = {}) {
     // A finished or paused task keeps the last rate it measured; it isn't moving any more.
     const bool moving = isTransferring(snap.state);
     QJsonObject task{
@@ -1179,6 +1348,8 @@ QJsonObject controlTaskJson(const orbit::core::TaskSnapshot& snap) {
     if (!snap.errorMessage.empty()) task.insert("error", QString::fromStdString(snap.errorMessage));
     static const char* const kChecksum[] = {"none", "pending", "verifying", "match", "mismatch", "failed"};
     task.insert("checksum", QString::fromLatin1(kChecksum[static_cast<int>(snap.checksumState)]));
+    // Virus scan, signature and duplicate results (FileChecks), when there are any.
+    if (!checks.isEmpty()) task.insert("checks", QJsonObject::fromVariantMap(checks));
     return task;
 }
 
@@ -1240,7 +1411,7 @@ QJsonObject MainWindow::handleControlRequest(const QJsonObject& request) {
         const orbit::core::TaskSnapshot* current = nullptr;
         const auto snapshots = manager_.snapshot();
         for (const auto& snap : snapshots) {
-            tasks.append(controlTaskJson(snap));
+            tasks.append(controlTaskJson(snap, fileChecks_->resultFor(static_cast<qlonglong>(snap.id))));
             switch (snap.state) {
                 case DownloadState::Downloading:
                 case DownloadState::Connecting:
@@ -1307,6 +1478,28 @@ QJsonObject MainWindow::handleControlRequest(const QJsonObject& request) {
             }
         }
 
+        if (metalink::looksLikeMetalink(source) && (QDir::isAbsolutePath(source) || isHttpUrl(source))) {
+            const QString dir = QString::fromStdString(download.destinationDir);
+            if (isHttpUrl(source)) {
+                // Fetched in the background; the files show up in `orbit list` once it's read.
+                const QString error = addMetalink(source, dir);
+                if (!error.isEmpty()) return fail(error);
+                return QJsonObject{{"ok", true}, {"pending", true}, {"message", QStringLiteral("Reading the Metalink; its files will be added")}};
+            }
+            QFile file(source);
+            if (!file.exists()) return fail(QStringLiteral("No such file: ") + source);
+            if (file.size() > metalink::kMaxBytes || !file.open(QIODevice::ReadOnly)) return fail(QStringLiteral("Couldn't read ") + source);
+            QString error;
+            const auto ids = addMetalinkData(file.readAll(), dir, &error);
+            if (ids.empty()) return fail(error);
+            emit metalinkAdded(static_cast<int>(ids.size()), {});
+            QJsonArray added;
+            for (const auto id : ids) {
+                if (const auto snap = manager_.snapshot(id)) added.append(controlTaskJson(*snap, fileChecks_->resultFor(static_cast<qlonglong>(id))));
+            }
+            return QJsonObject{{"ok", true}, {"downloads", added}};
+        }
+
         DownloadId id = 0;
         if (source.endsWith(QStringLiteral(".torrent"), Qt::CaseInsensitive) && QDir::isAbsolutePath(source)) {
             // The command line's own user asked for this file, so it starts right away
@@ -1323,7 +1516,7 @@ QJsonObject MainWindow::handleControlRequest(const QJsonObject& request) {
         if (id == 0) return fail(QStringLiteral("Orbit couldn't add it"));
         ORBIT_LOG_INFO("control", "Added a download from the command line");
         const auto snap = manager_.snapshot(id);
-        return QJsonObject{{"ok", true}, {"download", snap ? controlTaskJson(*snap) : QJsonObject{}}};
+        return QJsonObject{{"ok", true}, {"download", snap ? controlTaskJson(*snap, fileChecks_->resultFor(static_cast<qlonglong>(id))) : QJsonObject{}}};
     }
     if (type == QLatin1String("pause") || type == QLatin1String("resume") || type == QLatin1String("cancel") ||
         type == QLatin1String("remove")) {

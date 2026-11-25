@@ -9,6 +9,8 @@
 #endif
 
 #include <QAction>
+#include <QDir>
+#include <QFileInfo>
 #include <QActionGroup>
 #include <QIcon>
 #include <QMenu>
@@ -207,6 +209,25 @@ void TrayController::notifyMetered(int count) {
     }
 #endif
     showMessage(title, message, false, 6000);
+}
+
+void TrayController::notifyDuplicate(qlonglong id, const QString& name, const QString& originalPath) {
+    const QString title = QStringLiteral("Already downloaded");
+    const QString message = name + QStringLiteral(" is the same file as ") + QFileInfo(originalPath).fileName() +
+                            QStringLiteral(" in ") + QDir::toNativeSeparators(QFileInfo(originalPath).absolutePath()) + QStringLiteral(".");
+    ORBIT_LOG_INFO("tray", "Notification: " + title.toStdString() + " - " + message.toStdString());
+#if defined(__linux__)
+    if (desktopNotifications_ && desktopNotifications_->available()) {
+        desktopNotifications_->notify(title, message, false, QStringLiteral("transfer.complete"),
+                                      {DesktopNotifications::Action{QStringLiteral("trashcopy"), QStringLiteral("Move New Copy to Trash")},
+                                       DesktopNotifications::Action{QStringLiteral("revealoriginal"), QStringLiteral("Show Original")}},
+                                      QString::number(id));
+        return;
+    }
+#else
+    Q_UNUSED(id)
+#endif
+    showMessage(title, message, false, 8000);
 }
 
 void TrayController::setProgress(double progress, const QColor& color) {

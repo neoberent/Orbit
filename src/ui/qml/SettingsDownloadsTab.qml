@@ -168,7 +168,7 @@ ColumnLayout {
 
     SettingsGroup {
         title: "When a download finishes"
-        description: "Not for files whose checksum didn't match."
+        description: "Not for files whose checksum or signature didn't match, or where ClamAV found a threat."
 
         SettingsRow {
             divider: false
@@ -186,6 +186,50 @@ ColumnLayout {
             ToggleSwitch {
                 checked: appController.rememberOrigin
                 onToggled: appController.rememberOrigin = checked
+            }
+        }
+        SettingsRow {
+            label: "Check signatures"
+            description: "Looks for the .asc, .sig or .minisig file published beside a release download and checks it with GnuPG (your keyring) or your minisign keys"
+            ToggleSwitch {
+                checked: appController.checkSignatures
+                onToggled: appController.checkSignatures = checked
+            }
+        }
+        SettingsRow {
+            dimmed: !appController.checkSignatures
+            enabled: appController.checkSignatures
+            label: "Trusted minisign keys"
+            description: "The publishers' public keys (they start with RW), separated by spaces"
+            FormField {
+                Layout.preferredWidth: 260
+                monospace: true
+                accessibleLabel: "Trusted minisign public keys"
+                placeholderText: "RW… (from the publisher's website)"
+                text: appController.minisignKeys
+                onEditingFinished: {
+                    appController.minisignKeys = text
+                    text = appController.minisignKeys
+                }
+            }
+        }
+        SettingsRow {
+            label: "Scan with ClamAV"
+            description: appController.clamavAvailable
+                         ? "Uses the clamd daemon when it's running, otherwise clamscan. A file with a threat is left where it is, but never opened or unpacked."
+                         : "Install ClamAV (the clamav package) to scan downloads."
+            ToggleSwitch {
+                enabled: appController.clamavAvailable || appController.scanDownloads
+                checked: appController.scanDownloads
+                onToggled: appController.scanDownloads = checked
+            }
+        }
+        SettingsRow {
+            label: "Spot duplicates"
+            description: "Says when a finished file is the same as one you already have, and offers to move the new copy to the trash"
+            ToggleSwitch {
+                checked: appController.spotDuplicates
+                onToggled: appController.spotDuplicates = checked
             }
         }
         SettingsRow {

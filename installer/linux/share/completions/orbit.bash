@@ -20,7 +20,7 @@ _orbit() {
             if [[ $cur == -* ]]; then
                 COMPREPLY=($(compgen -W "--dir --input --checksum --force --mirror --json" -- "$cur"))
             else
-                COMPREPLY=($(compgen -f -X '!*.torrent' -- "$cur") $(compgen -d -- "$cur"))
+                COMPREPLY=($(compgen -f -X '!*.@(torrent|meta4|metalink)' -- "$cur") $(compgen -d -- "$cur"))
             fi
             ;;
         pause|resume|cancel|remove|rm)

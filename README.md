@@ -67,6 +67,13 @@ The code is split into two static libraries and the GUI:
   done.
 - **Checksums**: an expected MD5/SHA-1/SHA-256/SHA-512 is verified when a download finishes
   (a mismatch marks it corrupt), and any finished file can be hashed on demand.
+- **Signatures, virus scan, duplicates**: a release file's `.asc`/`.sig` is checked with your
+  GnuPG keyring (never a keyserver) and its `.minisig` against the minisign keys you trust; a
+  bad signature or a ClamAV hit (optional; clamd, or clamscan) leaves the file alone and skips
+  the after-download actions. A finished file that's the same as one you already have is
+  pointed out, with a button to move the new copy to the trash.
+- **Metalink**: `.meta4` and `.metalink` files (opened, dropped, pasted as a link, `orbit add`
+  or `aria2.addMetalink`) add each file with its mirrors and strongest checksum.
 - **Rename and move**: files, paused partial downloads (with their resume data) and torrents
   (through libtorrent's `rename_file`/`move_storage`) can be renamed or moved at any time.
 - **BitTorrent**: a single long-lived `libtorrent::session`, magnet links and `.torrent`
@@ -119,7 +126,7 @@ The code is split into two static libraries and the GUI:
   (words, -exclusions or /regex/) download by themselves. On btrfs, new torrents' files skip
   copy-on-write so scattered piece writes don't fragment them.
 - **aria2-compatible interface** (off by default): aria2's JSON-RPC on 127.0.0.1 with a
-  secret token, for add-ons and apps made for aria2.
+  secret token, for add-ons and apps made for aria2 (addUri, addTorrent, addMetalink).
 - **Clipboard monitoring**: copied magnet links and links to files are offered for download
   from a small prompt by the notification area.
 - **Power**: keeps the PC awake while downloading (Windows power requests; on Linux the

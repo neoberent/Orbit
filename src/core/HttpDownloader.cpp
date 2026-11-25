@@ -650,18 +650,20 @@ HttpDownloader::Fetched HttpDownloader::fetchSmall(const DownloadRequest& reques
     return out;
 }
 
-std::string HttpDownloader::fetchPublishedChecksum(const DownloadRequest& request, const std::string& fileName) const {
-    const std::string& url = request.source;
-    // Signed or generated links (anything with a query) don't have files beside them.
-    if (url.find_first_of("?#") != std::string::npos || fileName.empty()) return {};
+bool HttpDownloader::isReleaseFileName(const std::string& fileName) {
     static const char* const kReleaseTypes[] = {".iso", ".img", ".zip", ".7z", ".tar", ".gz", ".xz", ".zst", ".bz2",
                                                 ".appimage", ".deb", ".rpm", ".exe", ".msi", ".dmg", ".pkg", ".apk"};
     std::string lowerName = fileName;
     std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    const bool release = std::any_of(std::begin(kReleaseTypes), std::end(kReleaseTypes), [&](const char* ext) {
+    return std::any_of(std::begin(kReleaseTypes), std::end(kReleaseTypes), [&](const char* ext) {
         return lowerName.size() > std::strlen(ext) && lowerName.compare(lowerName.size() - std::strlen(ext), std::string::npos, ext) == 0;
     });
-    if (!release) return {};
+}
+
+std::string HttpDownloader::fetchPublishedChecksum(const DownloadRequest& request, const std::string& fileName) const {
+    const std::string& url = request.source;
+    // Signed or generated links (anything with a query) don't have files beside them.
+    if (url.find_first_of("?#") != std::string::npos || !isReleaseFileName(fileName)) return {};
 
     for (const char* suffix : {".sha256", ".sha512", ".sha256sum"}) {
         CURL* curl = curl_easy_init();

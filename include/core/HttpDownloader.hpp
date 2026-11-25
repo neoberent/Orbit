@@ -79,6 +79,9 @@ public:
         std::string error;
     };
     [[nodiscard]] Fetched fetchSmall(const DownloadRequest& request, std::size_t maxBytes) const;
+    // Release files (disk images, archives, packages, installers) are the ones projects
+    // publish checksums and signatures beside, as <link>.sha256, <link>.asc and so on.
+    [[nodiscard]] static bool isReleaseFileName(const std::string& fileName);
 
     // Points a partial download's .orbitresume sidecar at a new link, so a resume picks
     // up the bytes already on disk instead of starting over. False if there's no sidecar.

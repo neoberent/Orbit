@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QMap>
 #include <QString>
 
 #include <atomic>
@@ -48,6 +49,10 @@ public:
         qint64 advertisedSize{0};
         // Sent as Content-Disposition when set.
         QString fileName;
+        // Other files by path ("/file.iso.minisig"), served whole. When payloadPath is set,
+        // only that path serves the payload and any other path not in `files` is a 404.
+        QMap<QByteArray, QByteArray> files;
+        QByteArray payloadPath;
     };
 
     TestHttpServer();

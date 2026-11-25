@@ -210,6 +210,12 @@ qt_add_executable(orbit
     src/ui/FeedWatcher.hpp
     src/ui/Aria2RpcServer.cpp
     src/ui/Aria2RpcServer.hpp
+    src/ui/Metalink.cpp
+    src/ui/Metalink.hpp
+    src/ui/SignatureCheck.cpp
+    src/ui/SignatureCheck.hpp
+    src/ui/FileChecks.cpp
+    src/ui/FileChecks.hpp
     src/ui/resources.qrc
     $<$<NOT:$<PLATFORM_ID:Windows>>:${CMAKE_CURRENT_SOURCE_DIR}/src/ui/fonts.qrc>
     $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/src/ui/assets/app.rc>

@@ -289,7 +289,7 @@ void registerDesktopEntry(const QString& executablePath) {
         "Icon=orbit\n"
         "Terminal=false\n"
         "Categories=Network;FileTransfer;\n"
-        "MimeType=x-scheme-handler/orbit;application/x-bittorrent;\n"
+        "MimeType=x-scheme-handler/orbit;application/x-bittorrent;application/metalink4+xml;application/metalink+xml;\n"
         "StartupNotify=true\n"
         "StartupWMClass=orbit\n"
         "Actions=new-download;pause-all;resume-all;\n"
